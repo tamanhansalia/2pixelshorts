@@ -1,9 +1,11 @@
 [package]
 name = "pixelshorts"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "Local CLI video studio and social publisher for vertical shorts"
+authors = ["Taman Patel"]
+repository = "https://github.com/tamanhansalia/2pixelshorts"
 edition = "2021"
+license = "MIT"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

@@ -151,14 +151,16 @@ fn exe_dir() -> Option<std::path::PathBuf> {
 
 /// Locate `short_pipeline.py`: exe-relative layouts first (cargo dev
 /// target dir, macOS/Windows bundles with resources), then the legacy
-/// CWD-relative candidates. Falls back to the legacy Windows path so
-/// behavior is unchanged when nothing matches (spawn then fails cleanly).
+/// CWD-relative candidates. Missing helpers fail through the normal job error
+/// path without depending on a developer-specific installation directory.
 /// Exe-relative helper candidates for one executable directory.
 /// Bundle layouts depend on the resource mapping: macOS lands at
 /// `Resources/_up_/video-use/helpers/` (verified in the built .app);
 /// the flat and exe-adjacent forms cover other mappings.
 fn pipeline_exe_candidates(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     [
+        "../../../video-use/helpers/short_pipeline.py",
+        "../../../../video-use/helpers/short_pipeline.py",
         "../../video-use/helpers/short_pipeline.py",
         "../Resources/_up_/video-use/helpers/short_pipeline.py",
         "../Resources/helpers/short_pipeline.py",
@@ -180,18 +182,23 @@ pub fn resolve_pipeline_script() -> String {
         }
     }
 
-    const CANDIDATES: [&str; 4] = [
-        "../video-use/helpers/short_pipeline.py",
+    let source_helper = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../video-use/helpers/short_pipeline.py");
+    if source_helper.is_file() {
+        return source_helper.to_string_lossy().to_string();
+    }
+
+    const CANDIDATES: [&str; 3] = [
         "video-use/helpers/short_pipeline.py",
+        "../video-use/helpers/short_pipeline.py",
         "../../video-use/helpers/short_pipeline.py",
-        "C:\\Users\\Taman\\Documents\\2pixelspace-short\\video-use\\helpers\\short_pipeline.py",
     ];
 
     CANDIDATES
         .iter()
-        .find(|p| std::path::Path::new(p).exists())
+        .find(|p| std::path::Path::new(p).is_file())
         .copied()
-        .unwrap_or(CANDIDATES[3])
+        .unwrap_or(CANDIDATES[0])
         .to_string()
 }
 
@@ -750,6 +757,18 @@ mod tests {
         )));
         assert!(joined.iter().any(|p| p
             .ends_with("../../video-use/helpers/short_pipeline.py")));
+    }
+
+    #[test]
+    fn executable_lookup_finds_engine_without_repository_working_directory() {
+        let dir = std::env::current_exe().unwrap().parent().unwrap().to_path_buf();
+        let helper = pipeline_exe_candidates(&dir)
+            .into_iter()
+            .find(|candidate| candidate.is_file())
+            .expect("executable-relative engine lookup must survive repository relocation");
+        let expected = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../video-use/helpers/short_pipeline.py");
+        assert_eq!(helper.canonicalize().unwrap(), expected.canonicalize().unwrap());
     }
 
     #[test]

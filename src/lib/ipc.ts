@@ -28,13 +28,13 @@ export async function validateApiKey(provider: "zernio" | "elevenlabs" | "youtub
   await invoke("validate_api_key", { provider, apiKey });
 }
 
-// Fallback mock data matching the user's actual host machine tools
+// Simulated CLI tools used only by the browser preview.
 export const MOCK_TOOLS: CliToolInfo[] = [
   {
     id: "claude",
     name: "Claude Code CLI",
     command: "claude",
-    path: "C:\\Users\\Taman\\.local\\bin\\claude.exe",
+    path: "claude",
     version: "2.1.220 (Claude Code)",
     is_available: true,
     is_enabled: true,
@@ -45,7 +45,7 @@ export const MOCK_TOOLS: CliToolInfo[] = [
     id: "codex",
     name: "Codex CLI",
     command: "codex",
-    path: "C:\\Users\\Taman\\AppData\\Roaming\\npm\\codex.cmd",
+    path: "codex",
     version: "codex-cli 0.145.0",
     is_available: true,
     is_enabled: true,
@@ -56,7 +56,7 @@ export const MOCK_TOOLS: CliToolInfo[] = [
     id: "agy",
     name: "Antigravity CLI (AGY)",
     command: "agy",
-    path: "C:\\Users\\Taman\\AppData\\Local\\agy\\bin\\agy.exe",
+    path: "agy",
     version: "1.2.12",
     is_available: true,
     is_enabled: true,
@@ -67,7 +67,7 @@ export const MOCK_TOOLS: CliToolInfo[] = [
     id: "grok",
     name: "Grok CLI",
     command: "grok",
-    path: "C:\\Users\\Taman\\.grok\\bin\\grok.exe",
+    path: "grok",
     version: "grok 1.0.0 (3cd0d0cbce)",
     is_available: true,
     is_enabled: true,
@@ -78,7 +78,7 @@ export const MOCK_TOOLS: CliToolInfo[] = [
     id: "ffmpeg",
     name: "FFmpeg",
     command: "ffmpeg",
-    path: "C:\\tools\\ffmpeg.exe",
+    path: "ffmpeg",
     version: "ffmpeg version 8.1.1",
     is_available: true,
     is_enabled: true,
@@ -89,7 +89,7 @@ export const MOCK_TOOLS: CliToolInfo[] = [
     id: "ffprobe",
     name: "FFprobe",
     command: "ffprobe",
-    path: "C:\\tools\\ffprobe.exe",
+    path: "ffprobe",
     version: "ffprobe version 8.1.1",
     is_available: true,
     is_enabled: true,
@@ -100,7 +100,7 @@ export const MOCK_TOOLS: CliToolInfo[] = [
     id: "python",
     name: "Python 3 Runtime",
     command: "python",
-    path: "C:\\Python313\\python.exe",
+    path: "python",
     version: "Python 3.13.14",
     is_available: true,
     is_enabled: true,

@@ -1,4 +1,9 @@
-# 2pixelshorts — Complete Project Specification & Master Blueprint
+# 2pixelshorts — Historical Project Blueprint
+
+> Archived planning document. It describes goals as well as implemented features;
+> use the [README](../../README.md), [installation guide](../installation.md), and
+> [validation report](../e2e-security-review.md) for current behavior and commands.
+> Run build commands from the repository root.
 
 > **A 100% local CLI-powered short-form video creation and social publishing studio.**  
 > Built with **React (Vite) + Tailwind CSS + shadcn/ui + Tauri v2 + Rust**.
@@ -128,97 +133,20 @@ Unlike tools like *BridgeClip* or cloud-only SaaS solutions that charge per-vide
 
 ---
 
-## 5. File Structure Blueprint
+## 5. Current repository layout
 
-```
-2pixelspace-short/
-├── PROJECT_SPEC.md                 # This master blueprint
-├── video-use/                      # Existing video-use engine & helpers
-│   ├── helpers/                    # transcribe.py, render.py, grade.py, etc.
-│   └── ...
-│
-├── 2pixelshorts/                   # Tauri v2 Desktop App
-│   ├── package.json
-│   ├── tsconfig.json
-│   ├── vite.config.ts
-│   ├── tailwind.config.js
-│   ├── components.json             # shadcn/ui configuration
-│   │
-│   ├── src/                        # React Frontend
-│   │   ├── main.tsx
-│   │   ├── App.tsx
-│   │   ├── index.css
-│   │   │
-│   │   ├── components/
-│   │   │   ├── ui/                 # shadcn/ui primitives (Button, Dialog, Card, etc.)
-│   │   │   ├── layout/
-│   │   │   │   ├── Sidebar.tsx
-│   │   │   │   ├── Header.tsx
-│   │   │   │   └── AppLayout.tsx
-│   │   │   ├── cli/
-│   │   │   │   ├── CLIManagerModal.tsx
-│   │   │   │   ├── CLIToolCard.tsx
-│   │   │   │   └── CustomCLIPicker.tsx
-│   │   │   ├── studio/
-│   │   │   │   ├── ClipDropzone.tsx
-│   │   │   │   ├── VideoPlayer.tsx
-│   │   │   │   ├── PresetSelector.tsx
-│   │   │   │   ├── TranscriptEditor.tsx
-│   │   │   │   └── RenderProgressBar.tsx
-│   │   │   ├── social/
-│   │   │   │   ├── AccountList.tsx
-│   │   │   │   ├── PostComposer.tsx
-│   │   │   │   └── PlatformToggles.tsx
-│   │   │   └── scheduler/
-│   │   │       ├── CalendarView.tsx
-│   │   │       ├── QueueList.tsx
-│   │   │       └── ScheduleModal.tsx
-│   │   │
-│   │   ├── hooks/
-│   │   │   ├── useCLI.ts           # Interacts with Rust CLI commands
-│   │   │   ├── useStudio.ts        # Manages video editing state & rendering
-│   │   │   ├── useZernio.ts        # Connects accounts & triggers publish
-│   │   │   └── useScheduler.ts     # Fetches and mutates scheduled queue
-│   │   │
-│   │   ├── stores/                 # Zustand state stores
-│   │   │   ├── cliStore.ts
-│   │   │   ├── studioStore.ts
-│   │   │   └── scheduleStore.ts
-│   │   │
-│   │   └── lib/
-│   │       ├── tauri.ts            # Typed Tauri invoke wrapper
-│   │       ├── types.ts            # Shared TypeScript interfaces
-│   │       └── utils.ts            # shadcn cn() and formatting helpers
-│   │
-│   └── src-tauri/                  # Tauri Rust Backend
-│       ├── Cargo.toml
-│       ├── tauri.conf.json
-│       ├── capabilities/           # Tauri v2 security capabilities
-│       │   └── default.json
-│       └── src/
-│           ├── main.rs             # Tauri application entry point
-│           ├── lib.rs              # Tauri setup & command registration
-│           │
-│           ├── commands/           # Tauri IPC commands
-│           │   ├── mod.rs
-│           │   ├── cli.rs          # scan_clis, add_cli, remove_cli, toggle_cli
-│           │   ├── video.rs        # probe_clip, run_transcribe, run_render
-│           │   ├── zernio.rs       # get_accounts, publish_post
-│           │   └── scheduler.rs    # get_queue, add_schedule, delete_schedule
-│           │
-│           ├── core/               # Business logic
-│           │   ├── mod.rs
-│           │   ├── cli_scanner.rs  # PATH scanning & version probing
-│           │   ├── process_runner.rs # tokio::process spawner with event emit
-│           │   ├── db.rs           # SQLite connection & migrations
-│           │   ├── scheduler_loop.rs # Background tokio timer loop
-│           │   └── zernio_client.rs# reqwest client for Zernio REST API
-│           │
-│           └── models/             # Rust data structures
-│               ├── mod.rs
-│               ├── cli_tool.rs
-│               ├── preset.rs
-│               └── schedule_job.rs
+The application now runs directly from the `2pixelshorts` repository root.
+See [the maintained structure guide](../project-structure.md) for the current
+layout. The blueprint below the other headings is historical planning.
+
+```text
+2pixelshorts/
+├── src/             # React frontend
+├── src-tauri/       # Rust desktop backend and native resources
+├── video-use/       # Python video engine, models, setup, and tests
+├── public/          # Browser assets and subtitle previews
+├── scripts/         # Maintenance and platform setup helpers
+└── docs/            # Installation, architecture, and validation notes
 ```
 
 ---
@@ -324,4 +252,4 @@ npm run tauri dev
 cd 2pixelshorts
 npm run tauri build
 ```
-The output `.exe` installer will be generated in `2pixelshorts/src-tauri/target/release/bundle/msi` or `nsis`.
+The output `.exe` installer will be generated in `src-tauri/target/release/bundle/msi` or `nsis`.

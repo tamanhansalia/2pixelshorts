@@ -1,8 +1,8 @@
 # video-use engine (local install)
 
 Python video engine for 2pixelshorts. The Tauri backend shells out to
-`helpers/short_pipeline.py` (see `../src-tauri/src/lib.rs` `render_short` /
-`generate_seo_metadata`). This folder lives **inside** the `2pixelshorts` app
+`helpers/short_pipeline.py` (see `../src-tauri/src/jobs.rs` and
+`../src-tauri/src/lib.rs`). This folder lives at the `2pixelshorts` repository root
 so the backend's relative lookups resolve on every machine:
 
 - dev from `src-tauri/` → `../video-use/helpers/short_pipeline.py`
@@ -10,7 +10,7 @@ so the backend's relative lookups resolve on every machine:
 
 ## Helpers
 
-| Script | Role (per PROJECT_SPEC.md) |
+| Script | Role |
 |---|---|
 | `helpers/short_pipeline.py` | Entry point: orchestrates transcribe → pack → cut → render; `--generate-seo-only` prints the SEO JSON between `__SEO_METADATA_START__` / `__SEO_METADATA_END__` markers |
 | `helpers/agent_edit.py` | Agent-driven cut selection: builds an edit prompt from takes + channel context, invokes an agent CLI headlessly, validates the returned EDL |
@@ -25,8 +25,8 @@ so the backend's relative lookups resolve on every machine:
 
 ## Prerequisites
 
-- Python 3.9+ (`python` on Windows, `python3` on macOS/Linux — the backend
-  picks the right one per platform)
+- Python 3.10+ (`python` on Windows, `python3` on macOS/Linux); Python 3.13
+  is the tested local transcription runtime.
 
 Local transcription setup requires Python 3.10+ to install patched dependencies;
 Python 3.13 is the tested runtime. Setup prefers an installed supported version,

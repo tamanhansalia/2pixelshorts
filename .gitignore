@@ -1,19 +1,48 @@
-# Rendered / intermediate video outputs — never track these
+# Dependencies and builds
+node_modules/
+dist/
+dist-ssr/
+*.tsbuildinfo
+
+# Python environments, bytecode, and caches
+.venv
+__pycache__/
+*.py[cod]
+.cache/
+
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+!.env.sample
+*.local
+
+# Logs
+logs/
+*.log
+
+# Editor and operating-system metadata
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Local research, media, and downloaded tools
+.local-artifacts/
+framing-review/
+scratch/
+edit_tmp/
 *.mp4
 *.mov
 *.mkv
 *.avi
 *.webm
 *.m4v
-
-# Scratch work and temp edit folders
-scratch/
-edit_tmp/
-
-# Local machine metadata, environments, and credentials
-.DS_Store
-.venv
-.env
-.env.*
-!.env.example
-!.env.sample
+takes_packed.md
+words.json
+edl.json

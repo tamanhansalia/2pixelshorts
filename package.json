@@ -34,5 +34,18 @@
     "tailwindcss": "^4.3.3",
     "typescript": "~6.0.3",
     "vite": "^8.0.16"
-  }
+  },
+  "description": "Local CLI video studio and social publisher for vertical shorts",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tamanhansalia/2pixelshorts.git"
+  },
+  "bugs": {
+    "url": "https://github.com/tamanhansalia/2pixelshorts/issues"
+  },
+  "homepage": "https://github.com/tamanhansalia/2pixelshorts#readme",
+  "engines": {
+    "node": ">=24"
+  },
+  "license": "MIT"
 }
