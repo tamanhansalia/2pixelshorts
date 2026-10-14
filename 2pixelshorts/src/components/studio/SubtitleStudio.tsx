@@ -1,15 +1,19 @@
 import React, { useState, useEffect } from "react";
 import {
-  Play,
-  Pause,
-  RotateCcw,
-  Check,
-  Type,
-  AlignVerticalJustifyStart,
   AlignVerticalJustifyCenter,
   AlignVerticalJustifyEnd,
-  Sliders,
+  AlignVerticalJustifyStart,
+  Captions,
+  Check,
+  Pause,
+  Play,
+  RotateCcw,
 } from "lucide-react";
+import { Label, Switch } from "@heroui/react";
+import { Button } from "../ui/Button";
+import { SectionCard } from "../ui/Card";
+import { EmptyState } from "../ui/EmptyState";
+import { Segmented } from "../ui/Segmented";
 
 export type SubtitlePosition = "top" | "center" | "bottom";
 export type SubtitleSize = "compact" | "standard" | "large";
@@ -45,15 +49,6 @@ export const SUBTITLE_THEMES: SubtitleThemeDefinition[] = [
     sampleWords: ["Create", "Viral", "Shorts"],
   },
   {
-    id: "impact",
-    name: "Impact",
-    tag: "Heavy Yellow",
-    category: "viral",
-    colors: ["#FACC15", "#FFFFFF", "#000000"],
-    description: "Ultra-condensed heavy typography with pitch black outline",
-    sampleWords: ["MASSIVE", "RESULTS", "TODAY"],
-  },
-  {
     id: "glow",
     name: "Glow",
     tag: "Cyan Electric",
@@ -72,15 +67,6 @@ export const SUBTITLE_THEMES: SubtitleThemeDefinition[] = [
     sampleWords: ["CLEAN", "MINIMAL", "SETUP"],
   },
   {
-    id: "sweep",
-    name: "Sweep",
-    tag: "Pink Karaoke",
-    category: "neon",
-    colors: ["#EC4899", "#FFFFFF"],
-    description: "Dynamic karaoke style with hot magenta word sweep",
-    sampleWords: ["Dynamic", "Flowing", "Karaoke"],
-  },
-  {
     id: "editorial",
     name: "Editorial",
     tag: "Documentary",
@@ -95,7 +81,7 @@ export const SUBTITLE_THEMES: SubtitleThemeDefinition[] = [
     tag: "Toxic Green",
     category: "viral",
     colors: ["#22C55E", "#FFFFFF"],
-    description: "High-tempo energy with neon toxic green accent",
+    description: "High-tempo slanted energy with toxic green glow",
     sampleWords: ["HYPER", "FAST", "GROWTH"],
   },
   {
@@ -106,24 +92,6 @@ export const SUBTITLE_THEMES: SubtitleThemeDefinition[] = [
     colors: ["#FFFFFF", "#000000"],
     description: "Massive isolated single-word punch for ultra-fast retention",
     sampleWords: ["", "INSANE", ""],
-  },
-  {
-    id: "neon",
-    name: "Neon",
-    tag: "Violet Tube",
-    category: "neon",
-    colors: ["#F43F5E", "#A855F7"],
-    description: "Vaporwave tube glow with magenta-violet gradient aura",
-    sampleWords: ["NIGHT", "CITY", "PULSE"],
-  },
-  {
-    id: "headline",
-    name: "Headline",
-    tag: "News Badge",
-    category: "pill",
-    colors: ["#EF4444", "#FFFFFF"],
-    description: "Breaking news urgency with bold crimson capsule",
-    sampleWords: ["BREAKING", "UPDATE", "ALERT"],
   },
   {
     id: "paper",
@@ -144,6 +112,9 @@ export const SUBTITLE_THEMES: SubtitleThemeDefinition[] = [
     sampleWords: ["simple", "natural", "clarity"],
   },
 ];
+
+// Fixed preview phrase for the 9:16 monitor.
+const DEFAULT_PREVIEW_TEXT = "THIS NEW AI TOOL CHANGES EVERYTHING";
 
 interface SubtitleStudioProps {
   selectedTheme: string;
@@ -173,23 +144,26 @@ export const SubtitleStudio: React.FC<SubtitleStudioProps> = ({
   videoTitle,
 }) => {
   const [activeCategory, setActiveCategory] = useState<string>("all");
-  const [customText, setCustomText] = useState<string>(
-    "THIS NEW AI TOOL CHANGES EVERYTHING"
-  );
   const [isPlaying, setIsPlaying] = useState<boolean>(true);
   const [activeWordIndex, setActiveWordIndex] = useState<number>(0);
   const [showGuides, setShowGuides] = useState<boolean>(false);
 
-  // Split custom phrase into words
+  // Split the default preview phrase into words
   const words = React.useMemo(() => {
-    const raw = customText.trim() ? customText.trim().split(/\s+/) : ["AI", "CREATES", "MAGIC"];
+    const raw = DEFAULT_PREVIEW_TEXT.trim()
+      ? DEFAULT_PREVIEW_TEXT.trim().split(/\s+/)
+      : ["AI", "CREATES", "MAGIC"];
     return raw.map((w, idx) => {
       if (casing === "uppercase") return w.toUpperCase();
-      if (casing === "title") return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
-      if (casing === "sentence") return idx === 0 ? w.charAt(0).toUpperCase() + w.slice(1).toLowerCase() : w.toLowerCase();
+      if (casing === "title")
+        return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
+      if (casing === "sentence")
+        return idx === 0
+          ? w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()
+          : w.toLowerCase();
       return w;
     });
-  }, [customText, casing]);
+  }, [casing]);
 
   // Real-time animation ticker
   useEffect(() => {
@@ -206,31 +180,63 @@ export const SubtitleStudio: React.FC<SubtitleStudioProps> = ({
     return SUBTITLE_THEMES.filter((t) => t.category === activeCategory);
   }, [activeCategory]);
 
-  // Size class calculation
+  // Caption contract shared with video-use/helpers/render.py (words_to_ass).
+  // The render canvas is 1080x1920; the monitor is a fluid-width column,
+  // so preview sizes use container-query widths (FontSize px / 1080) and
+  // match the burn at ANY monitor width instead of only at 300px:
+  // compact 42px -> 3.89cqw, standard 50px -> 4.63cqw, large 60px -> 5.56cqw.
+  // Punch burns single words at 88/104/125px -> 8.15/9.63/11.57cqw.
+  // (The px fallback before each cqw class covers engines without
+  // container-query units.) Positions mirror MarginV as % of height:
+  // top 140 -> 7.3%, exact middle <-> Alignment 5, bottom 200 -> 10.4%.
+  // Keep these fractions in sync when either side changes.
   const getSizeClasses = () => {
+    if (selectedTheme === "punch") {
+      switch (size) {
+        case "compact":
+          return "text-[24px] text-[8.15cqw] leading-none tracking-wide";
+        case "large":
+          return "text-[34px] text-[11.57cqw] leading-none tracking-wide";
+        case "standard":
+        default:
+          return "text-[29px] text-[9.63cqw] leading-none tracking-wide";
+      }
+    }
     switch (size) {
       case "compact":
-        return "text-xs tracking-tight";
+        return "text-xs text-[3.89cqw] leading-none tracking-tight";
       case "large":
-        return "text-base tracking-wide";
+        return "text-base text-[5.56cqw] leading-none tracking-wide";
       case "standard":
       default:
-        return "text-sm tracking-normal";
+        return "text-sm text-[4.63cqw] leading-none tracking-normal";
     }
   };
 
-  // Position class calculation for 9:16 monitor canvas
   const getPositionClasses = () => {
     switch (position) {
       case "top":
-        return "top-10";
+        return "top-[7.3%]";
       case "center":
         return "top-1/2 -translate-y-1/2";
       case "bottom":
       default:
-        return "bottom-14";
+        return "bottom-[10.4%]";
     }
   };
+
+  // Rolling cue window, mirroring the renderer's cue chunking
+  // (cue_size_for_style: 1 word for punch, 2 for every other theme). The
+  // burned output shows one cue at a time with only the spoken word
+  // highlighted, so the preview shows exactly the active cue — not the
+  // whole phrase — with the same active-word emphasis.
+  const wordsPerCue = selectedTheme === "punch" ? 1 : 2;
+  const activeCueStart =
+    Math.floor(activeWordIndex / wordsPerCue) * wordsPerCue;
+  const activeCueWords = words.slice(
+    activeCueStart,
+    activeCueStart + wordsPerCue,
+  );
 
   // Helper to render active word styling based on theme
   const renderThemeText = (themeId: string, word: string, isActive: boolean) => {
@@ -238,15 +244,20 @@ export const SubtitleStudio: React.FC<SubtitleStudioProps> = ({
       case "pop":
         return (
           <span
-            className={`font-black uppercase inline-block transition-transform duration-150 ${
-              isActive
-                ? "text-[#FFE500] scale-110"
-                : "text-white"
+            className={`inline-block font-black uppercase transition-transform duration-150 ${
+              isActive ? "scale-110 text-[#FFE500]" : "text-white"
             }`}
-            style={{
-              textShadow:
-                "2px 2px 0 #000, -1.5px -1.5px 0 #000, 1.5px -1.5px 0 #000, -1.5px 1.5px 0 #000, 0 3px 6px rgba(0,0,0,0.9)",
-            }}
+            style={
+              isActive
+                ? {
+                    textShadow:
+                      "2px 2px 0 #000, -2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000, 0 1px 0 #a38f00, 0 2px 0 #8a7900, 0 3px 0 #6e6100, 0 4px 0 #57500a, 0 5px 0 #000, 0 8px 14px rgba(0,0,0,0.8)",
+                  }
+                : {
+                    textShadow:
+                      "2px 2px 0 #000, -1.5px -1.5px 0 #000, 1.5px -1.5px 0 #000, -1.5px 1.5px 0 #000",
+                  }
+            }
           >
             {word}
           </span>
@@ -254,28 +265,13 @@ export const SubtitleStudio: React.FC<SubtitleStudioProps> = ({
 
       case "spotlight":
         return isActive ? (
-          <span className="bg-[#7C3AED] text-white px-2 py-0.5 rounded-full font-bold shadow-md shadow-purple-900/50 inline-block scale-105 transition-all">
+          <span className="inline-block scale-105 rounded-full bg-[#7C3AED] px-2 py-0.5 font-bold text-white shadow-md shadow-purple-900/50 transition-all">
             {word}
           </span>
         ) : (
           <span
-            className="text-white font-bold inline-block"
+            className="inline-block font-bold text-white"
             style={{ textShadow: "0 2px 4px rgba(0,0,0,0.9)" }}
-          >
-            {word}
-          </span>
-        );
-
-      case "impact":
-        return (
-          <span
-            className={`font-black uppercase tracking-tight inline-block transition-all ${
-              isActive ? "text-[#FACC15] scale-105" : "text-white"
-            }`}
-            style={{
-              textShadow:
-                "2px 2px 0 #000, -2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000",
-            }}
           >
             {word}
           </span>
@@ -284,16 +280,14 @@ export const SubtitleStudio: React.FC<SubtitleStudioProps> = ({
       case "glow":
         return (
           <span
-            className={`font-extrabold uppercase tracking-wide inline-block transition-all ${
-              isActive
-                ? "text-[#00F5FF]"
-                : "text-white/90"
+            className={`inline-block font-extrabold uppercase tracking-wide transition-all ${
+              isActive ? "text-[#00F5FF]" : "text-white/60"
             }`}
             style={
               isActive
                 ? {
                     textShadow:
-                      "0 0 10px #00F5FF, 0 0 20px rgba(0, 245, 255, 0.7), 1px 1px 2px #000",
+                      "0 0 8px rgba(0,245,255,0.95), 0 0 22px rgba(0,245,255,0.6), 0 0 46px rgba(0,245,255,0.35)",
                   }
                 : { textShadow: "0 2px 4px rgba(0,0,0,0.8)" }
             }
@@ -305,30 +299,9 @@ export const SubtitleStudio: React.FC<SubtitleStudioProps> = ({
       case "boxed":
         return (
           <span
-            className={`font-bold tracking-tight inline-block ${
+            className={`inline-block font-bold tracking-tight ${
               isActive ? "text-[#FACC15]" : "text-neutral-100"
             }`}
-          >
-            {word}
-          </span>
-        );
-
-      case "sweep":
-        return (
-          <span
-            className={`font-extrabold tracking-tight inline-block transition-all ${
-              isActive
-                ? "text-[#EC4899] scale-105"
-                : "text-white"
-            }`}
-            style={
-              isActive
-                ? {
-                    textShadow:
-                      "0 0 12px rgba(236,72,153,0.8), 1px 1px 2px #000",
-                  }
-                : { textShadow: "0 2px 4px rgba(0,0,0,0.8)" }
-            }
           >
             {word}
           </span>
@@ -337,9 +310,9 @@ export const SubtitleStudio: React.FC<SubtitleStudioProps> = ({
       case "editorial":
         return (
           <span
-            className={`font-serif italic tracking-wide inline-block ${
+            className={`inline-block font-serif tracking-wide italic ${
               isActive
-                ? "text-[#EAB308] underline underline-offset-4 decoration-2"
+                ? "text-[#EAB308] underline decoration-2 underline-offset-4"
                 : "text-[#ECECE8]"
             }`}
             style={{ textShadow: "0 2px 4px rgba(0,0,0,0.9)" }}
@@ -351,10 +324,8 @@ export const SubtitleStudio: React.FC<SubtitleStudioProps> = ({
       case "hype":
         return (
           <span
-            className={`font-black uppercase tracking-tight inline-block transition-all ${
-              isActive
-                ? "text-[#22C55E] scale-110"
-                : "text-white"
+            className={`inline-block -skew-x-6 font-black tracking-tight uppercase transition-all ${
+              isActive ? "scale-110 text-[#22C55E]" : "text-white"
             }`}
             style={
               isActive
@@ -372,7 +343,7 @@ export const SubtitleStudio: React.FC<SubtitleStudioProps> = ({
       case "punch":
         return (
           <span
-            className="font-black uppercase tracking-wider text-white inline-block scale-110"
+            className="inline-block scale-110 font-black tracking-wider text-white uppercase"
             style={{
               textShadow:
                 "2.5px 2.5px 0 #000, -1.5px -1.5px 0 #000, 1.5px -1.5px 0 #000, -1.5px 1.5px 0 #000",
@@ -382,48 +353,11 @@ export const SubtitleStudio: React.FC<SubtitleStudioProps> = ({
           </span>
         );
 
-      case "neon":
-        return (
-          <span
-            className={`font-extrabold uppercase tracking-wide inline-block ${
-              isActive
-                ? "text-[#F43F5E]"
-                : "text-white/80"
-            }`}
-            style={
-              isActive
-                ? {
-                    textShadow:
-                      "0 0 12px #F43F5E, 0 0 24px #A855F7, 1px 1px 2px #000",
-                  }
-                : { textShadow: "0 2px 4px rgba(0,0,0,0.8)" }
-            }
-          >
-            {word}
-          </span>
-        );
-
-      case "headline":
-        return isActive ? (
-          <span className="bg-[#EF4444] text-white px-1.5 py-0.5 rounded font-black tracking-tight shadow-md inline-block">
-            {word}
-          </span>
-        ) : (
-          <span
-            className="font-black tracking-tight text-white inline-block"
-            style={{ textShadow: "2px 2px 0 #000" }}
-          >
-            {word}
-          </span>
-        );
-
       case "paper":
         return (
           <span
-            className={`font-bold tracking-tight inline-block ${
-              isActive
-                ? "text-[#7C3AED] font-black"
-                : "text-neutral-900"
+            className={`inline-block font-bold tracking-tight ${
+              isActive ? "font-black text-[#7C3AED]" : "text-neutral-900"
             }`}
           >
             {word}
@@ -433,10 +367,8 @@ export const SubtitleStudio: React.FC<SubtitleStudioProps> = ({
       case "subtle":
         return (
           <span
-            className={`font-medium tracking-normal inline-block ${
-              isActive
-                ? "text-[#FBBF24] font-semibold"
-                : "text-neutral-300"
+            className={`inline-block font-normal tracking-normal ${
+              isActive ? "font-medium text-[#FBBF24]" : "text-neutral-400"
             }`}
           >
             {word}
@@ -448,400 +380,315 @@ export const SubtitleStudio: React.FC<SubtitleStudioProps> = ({
     }
   };
 
-  // Wrapper for boxed / paper / subtle pill backgrounds
-  const renderSubtitleContainer = (themeId: string, children: React.ReactNode) => {
+  // Wrapper for boxed / paper container backgrounds
+  // (subtle is intentionally bare text with no backing container)
+  const renderSubtitleContainer = (
+    themeId: string,
+    children: React.ReactNode,
+  ) => {
     if (themeId === "boxed") {
       return (
-        <div className="bg-black/85 backdrop-blur-md px-3.5 py-1.5 rounded-xl border border-white/10 shadow-2xl inline-flex items-center gap-1.5 flex-wrap justify-center">
+        <div className="inline-flex flex-wrap items-center justify-center gap-1.5 rounded-xl border border-white/10 bg-black/85 px-3.5 py-1.5 shadow-2xl backdrop-blur-md">
           {children}
         </div>
       );
     }
     if (themeId === "paper") {
       return (
-        <div className="bg-white/95 px-3 py-1 rounded-full shadow-xl border border-neutral-200 inline-flex items-center gap-1.5 flex-wrap justify-center">
-          {children}
-        </div>
-      );
-    }
-    if (themeId === "subtle") {
-      return (
-        <div className="bg-black/60 px-3 py-1 rounded-lg backdrop-blur-xs border border-white/5 inline-flex items-center gap-1.5 flex-wrap justify-center">
+        <div className="inline-flex flex-wrap items-center justify-center gap-1.5 rounded-full border border-neutral-200 bg-white/95 px-3 py-1 shadow-xl">
           {children}
         </div>
       );
     }
     return (
-      <div className="inline-flex items-center gap-1.5 flex-wrap justify-center px-2">
+      <div className="inline-flex flex-wrap items-center justify-center gap-1.5 px-2">
         {children}
       </div>
     );
   };
 
-  return (
-    <div className="p-4 rounded-lg bg-surface border border-border space-y-4">
-      {/* Header bar */}
-      <div className="flex items-center justify-between pb-3 border-b border-border">
-        <div className="flex items-center gap-2">
-          <h2 className="text-xs font-semibold text-foreground tracking-tight">
-            Subtitles & Captions
-          </h2>
-        </div>
+  const settingRow = (label: string, control: React.ReactNode) => (
+    <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 py-3">
+      <span className="text-sm font-medium text-foreground">{label}</span>
+      {control}
+    </div>
+  );
 
-        {/* Burn in captions switch */}
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-muted">Burn in captions</span>
-          <button
-            type="button"
-            role="switch"
-            aria-checked={burnInCaptions}
-            onClick={() => onToggleBurnInCaptions(!burnInCaptions)}
-            className={`relative inline-flex h-4 w-7 shrink-0 cursor-pointer rounded-full border border-transparent transition-colors duration-150 ease-in-out focus:outline-none ${
-              burnInCaptions ? "bg-foreground" : "bg-surface-secondary border-border"
-            }`}
-          >
-            <span
-              className={`pointer-events-none inline-block h-3 w-3 transform rounded-full bg-background shadow-xs transition duration-150 ease-in-out mt-0.5 ${
-                burnInCaptions ? "translate-x-3.5" : "translate-x-0.5"
-              }`}
-            />
-          </button>
+  const captionSwitch = (
+    <Switch
+      size="sm"
+      isSelected={burnInCaptions}
+      onChange={onToggleBurnInCaptions}
+      aria-label="Burn in captions"
+    >
+      <Switch.Content>
+        <Label className="text-sm text-muted">Burn in</Label>
+        <Switch.Control>
+          <Switch.Thumb />
+        </Switch.Control>
+      </Switch.Content>
+    </Switch>
+  );
+
+  if (!burnInCaptions) {
+    return (
+      <SectionCard
+        title="Captions"
+        description="Off — the short renders as a clean 9:16 crop"
+        actions={captionSwitch}
+      >
+        <EmptyState
+          compact
+          icon={<Captions />}
+          title="Captions are off"
+          description="Turn on burn-in to add animated, word-timed captions and pick a style."
+        />
+      </SectionCard>
+    );
+  }
+
+  return (
+    <div className="grid items-start gap-5 lg:grid-cols-[18rem_minmax(0,1fr)]">
+      {/* 9:16 monitor */}
+      <div className="mx-auto w-full max-w-[18rem] lg:sticky lg:top-0 lg:mx-0">
+        <div className="overflow-hidden rounded-3xl bg-surface shadow-surface">
+          <div className="flex h-12 items-center justify-between border-b border-separator px-4">
+            <span className="text-sm font-semibold text-foreground">
+              Preview
+            </span>
+            <span className="tabular-nums text-xs text-muted">1080 × 1920</span>
+          </div>
+
+          {/* Viewport (container queries scale captions to any width) */}
+          <div className="@container relative flex aspect-[9/16] w-full flex-col justify-between overflow-hidden bg-neutral-950 select-none">
+            <div className="absolute inset-0 bg-neutral-950">
+              <div className="absolute inset-0 bg-[radial-gradient(ellipse_80%_80%_at_50%_35%,rgba(255,255,255,0.05),transparent)]" />
+              <div className="absolute inset-x-0 bottom-0 h-32 bg-gradient-to-t from-black/80 to-transparent" />
+            </div>
+
+            {showGuides && (
+              <div className="pointer-events-none absolute inset-3 z-10 flex flex-col justify-between rounded-sm border border-white/10">
+                <div className="border-b border-dashed border-white/15 p-1 text-[8px] tracking-wider text-white/30 uppercase">
+                  Top safe margin
+                </div>
+                <div className="border-t border-dashed border-white/15 p-1 text-right text-[8px] tracking-wider text-white/30 uppercase">
+                  Action safe area
+                </div>
+              </div>
+            )}
+
+            <div className="relative z-20 flex items-center justify-between px-3 pt-2.5 text-[10px] text-white/70">
+              <span className="max-w-[180px] truncate rounded bg-black/50 px-1.5 py-0.5 text-[9px]">
+                {videoTitle || "Untitled short"}
+              </span>
+              <span className="tabular-nums text-[9px] text-white/40">
+                {activeWordIndex + 1}/{words.length}
+              </span>
+            </div>
+
+            <div
+              className={`pointer-events-none absolute inset-x-[3.7%] z-20 text-center transition-all duration-200 ${getPositionClasses()} ${getSizeClasses()}`}
+            >
+              {renderSubtitleContainer(
+                selectedTheme,
+                <>
+                  {activeCueWords.map((word, idx) => (
+                    <React.Fragment key={activeCueStart + idx}>
+                      {renderThemeText(
+                        selectedTheme,
+                        word,
+                        activeCueStart + idx === activeWordIndex,
+                      )}{" "}
+                    </React.Fragment>
+                  ))}
+                </>,
+              )}
+            </div>
+
+            <div className="relative z-20 h-0.5 w-full bg-white/10">
+              <div
+                className="h-full bg-white/70 transition-all duration-200"
+                style={{
+                  width: `${((activeWordIndex + 1) / Math.max(1, words.length)) * 100}%`,
+                }}
+              />
+            </div>
+          </div>
+
+          {/* Transport */}
+          <div className="flex h-11 items-center justify-between border-t border-separator px-3">
+            <div className="flex items-center">
+              <Button
+                variant="ghost"
+                size="sm"
+                iconOnly
+                icon={isPlaying ? <Pause /> : <Play />}
+                onClick={() => setIsPlaying(!isPlaying)}
+                aria-label={isPlaying ? "Pause preview" : "Play preview"}
+                className="size-7"
+              />
+              <Button
+                variant="ghost"
+                size="sm"
+                iconOnly
+                icon={<RotateCcw />}
+                onClick={() => setActiveWordIndex(0)}
+                aria-label="Restart preview"
+                className="size-7"
+              />
+            </div>
+            <Button
+              variant={showGuides ? "tertiary" : "ghost"}
+              size="sm"
+              onClick={() => setShowGuides(!showGuides)}
+              aria-pressed={showGuides}
+              className="h-7"
+            >
+              Safe areas
+            </Button>
+          </div>
         </div>
       </div>
 
-      {burnInCaptions ? (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-          {/* Left Column: Professional 9:16 Video Monitor (5 cols) */}
-          <div className="lg:col-span-5 flex flex-col items-center">
-            {/* Professional Video Viewport Container */}
-            <div className="w-full max-w-[300px] rounded-lg bg-surface border border-border overflow-hidden shadow-xs flex flex-col">
-              {/* Monitor Top Control / Header Bar */}
-              <div className="h-7 bg-surface-secondary border-b border-border px-3 flex items-center justify-between text-[11px] select-none">
-                <div className="flex items-center gap-2">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                  <span className="font-mono text-[10px] font-semibold text-foreground tracking-wide uppercase">
-                    Monitor • 9:16
-                  </span>
-                </div>
-                <div className="flex items-center gap-2 text-[10px] font-mono text-muted">
-                  <span>1080×1920</span>
-                  <span className="text-border">•</span>
-                  <span>{isPlaying ? "00:04.18" : "PAUSED"}</span>
-                </div>
-              </div>
+      <div className="min-w-0 space-y-5">
+        <SectionCard
+          title="Captions"
+          description="Word-timed captions burned into the render"
+          actions={captionSwitch}
+          contentClassName="p-0 divide-y divide-separator"
+        >
+          {settingRow(
+            "Position",
+            <Segmented<SubtitlePosition>
+              label="Caption position"
+              value={position}
+              onChange={onChangePosition}
+              options={[
+                {
+                  value: "top",
+                  label: "Top",
+                  icon: <AlignVerticalJustifyStart />,
+                },
+                {
+                  value: "center",
+                  label: "Middle",
+                  icon: <AlignVerticalJustifyCenter />,
+                },
+                {
+                  value: "bottom",
+                  label: "Bottom",
+                  icon: <AlignVerticalJustifyEnd />,
+                },
+              ]}
+            />,
+          )}
+          {settingRow(
+            "Size",
+            <Segmented<SubtitleSize>
+              label="Caption size"
+              value={size}
+              onChange={onChangeSize}
+              options={[
+                { value: "compact", label: "Small" },
+                { value: "standard", label: "Medium" },
+                { value: "large", label: "Large" },
+              ]}
+            />,
+          )}
+          {settingRow(
+            "Casing",
+            <Segmented<SubtitleCase>
+              label="Caption casing"
+              value={casing}
+              onChange={onChangeCasing}
+              options={[
+                { value: "uppercase", label: "ABC" },
+                { value: "title", label: "Abc" },
+                { value: "sentence", label: "abc" },
+              ]}
+            />,
+          )}
+        </SectionCard>
 
-              {/* Viewport Screen */}
-              <div className="relative w-full aspect-[9/16] bg-neutral-950 overflow-hidden flex flex-col justify-between select-none">
-                {/* Subtle Studio Backdrop with Clean Dark Neutral Tone */}
-                <div className="absolute inset-0 bg-neutral-950">
-                  <div className="absolute inset-0 bg-[radial-gradient(ellipse_80%_80%_at_50%_35%,rgba(255,255,255,0.05),transparent)]" />
-                  <div className="absolute bottom-0 inset-x-0 h-32 bg-gradient-to-t from-black/80 to-transparent" />
-                </div>
-
-                {/* Optional Subtle Safe-Zone Guides Overlay (clean, technical) */}
-                {showGuides && (
-                  <div className="absolute inset-3 pointer-events-none z-10 border border-white/10 rounded-sm flex flex-col justify-between">
-                    <div className="border-b border-dashed border-white/15 p-1 text-[8px] font-mono text-white/30 uppercase tracking-wider">
-                      Top Safe Margin
-                    </div>
-                    <div className="border-t border-dashed border-white/15 p-1 text-[8px] font-mono text-white/30 uppercase tracking-wider text-right">
-                      Action Safe Area
-                    </div>
-                  </div>
-                )}
-
-                {/* Top Clip Info Banner */}
-                <div className="relative z-20 pt-2.5 px-3 flex items-center justify-between text-[10px] text-white/70">
-                  <span className="font-mono text-[9px] bg-black/60 px-2 py-0.5 rounded border border-white/10 truncate max-w-[180px]">
-                    {videoTitle || "Active Sequence"}
-                  </span>
-                  <span className="font-mono text-[9px] text-white/40">
-                    {activeWordIndex + 1}/{words.length}
-                  </span>
-                </div>
-
-                {/* Animated Subtitle Zone */}
-                <div
-                  className={`absolute inset-x-3 text-center z-20 transition-all duration-200 pointer-events-none ${getPositionClasses()} ${getSizeClasses()}`}
-                >
-                  {renderSubtitleContainer(
-                    selectedTheme,
-                    selectedTheme === "punch" ? (
-                      renderThemeText(
-                        selectedTheme,
-                        words[activeWordIndex] || "INSANE",
-                        true
-                      )
-                    ) : (
-                      words.map((word, idx) => (
-                        <React.Fragment key={idx}>
-                          {renderThemeText(
-                            selectedTheme,
-                            word,
-                            idx === activeWordIndex
-                          )}
-                        </React.Fragment>
-                      ))
-                    )
-                  )}
-                </div>
-
-                {/* Bottom Video Progress Scrub Bar */}
-                <div className="relative z-20 w-full bg-white/10 h-1">
-                  <div
-                    className="bg-white/80 h-full transition-all duration-200"
-                    style={{
-                      width: `${((activeWordIndex + 1) / Math.max(1, words.length)) * 100}%`,
-                    }}
-                  />
-                </div>
-              </div>
-
-              {/* Monitor Bottom Control Strip */}
-              <div className="h-9 px-3 bg-surface-secondary border-t border-border flex items-center justify-between text-xs">
-                <div className="flex items-center gap-1">
-                  <button
-                    type="button"
-                    onClick={() => setIsPlaying(!isPlaying)}
-                    className="p-1.5 rounded hover:bg-surface text-muted hover:text-foreground transition cursor-pointer"
-                    title={isPlaying ? "Pause Preview Animation" : "Play Preview Animation"}
-                  >
-                    {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setActiveWordIndex(0)}
-                    className="p-1.5 rounded hover:bg-surface text-muted hover:text-foreground transition cursor-pointer"
-                    title="Restart Animation Loop"
-                  >
-                    <RotateCcw className="w-3 h-3" />
-                  </button>
-                </div>
-
+        <SectionCard
+          title="Style"
+          description={
+            SUBTITLE_THEMES.find((t) => t.id === selectedTheme)?.description ??
+            "Pick a caption style"
+          }
+          actions={
+            <Segmented
+              label="Caption style category"
+              value={activeCategory}
+              onChange={setActiveCategory}
+              options={[
+                { value: "all", label: "All" },
+                { value: "viral", label: "Viral" },
+                { value: "pill", label: "Pill" },
+                { value: "neon", label: "Neon" },
+                { value: "cinematic", label: "Cinematic" },
+              ]}
+            />
+          }
+        >
+          <div
+            role="radiogroup"
+            aria-label="Caption style"
+            className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 2xl:grid-cols-3"
+          >
+            {filteredThemes.map((theme) => {
+              const isSelected = selectedTheme === theme.id;
+              return (
                 <button
                   type="button"
-                  onClick={() => setShowGuides(!showGuides)}
-                  className={`px-2 py-0.5 rounded text-[10px] font-mono transition cursor-pointer border ${
-                    showGuides
-                      ? "bg-surface text-foreground border-border shadow-xs"
-                      : "text-muted hover:text-foreground border-transparent"
+                  key={theme.id}
+                  role="radio"
+                  aria-checked={isSelected}
+                  onClick={() => onSelectTheme(theme.id)}
+                  title={theme.description}
+                  className={`overflow-hidden rounded-lg border text-left transition-colors ${
+                    isSelected
+                      ? "border-accent ring-2 ring-accent/20"
+                      : "border-border hover:border-border-tertiary"
                   }`}
-                  title="Toggle Title Safe Guides"
                 >
-                  Guides
-                </button>
-              </div>
-            </div>
-          </div>
-
-          {/* Right Column: Theme Carousel & Controls (7 cols) */}
-          <div className="lg:col-span-7 space-y-5">
-            {/* Position, Size & Casing Controls Toolbar */}
-            <div className="p-3.5 rounded-lg bg-surface-secondary/50 border border-border space-y-3">
-              <div className="text-xs font-semibold text-foreground flex items-center gap-1.5">
-                <Sliders className="w-3.5 h-3.5 text-foreground" />
-                <span>Typography</span>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                {/* Position Segmented Control */}
-                <div className="space-y-1.5">
-                  <label className="text-[11px] font-medium text-muted block">
-                    Vertical Position
-                  </label>
-                  <div className="grid grid-cols-3 gap-1 bg-surface p-1 rounded-lg border border-border">
-                    {[
-                      { id: "top" as SubtitlePosition, label: "Top", icon: AlignVerticalJustifyStart },
-                      { id: "center" as SubtitlePosition, label: "Center", icon: AlignVerticalJustifyCenter },
-                      { id: "bottom" as SubtitlePosition, label: "Bottom", icon: AlignVerticalJustifyEnd },
-                    ].map((pos) => {
-                      const isSelected = position === pos.id;
-                      const Icon = pos.icon;
-                      return (
-                        <button
-                          type="button"
-                          key={pos.id}
-                          onClick={() => onChangePosition(pos.id)}
-                          className={`py-1.5 px-2 rounded-md text-[11px] font-medium flex items-center justify-center gap-1 transition cursor-pointer ${
-                            isSelected
-                              ? "bg-foreground text-background shadow-xs font-semibold"
-                              : "text-muted hover:text-foreground"
-                          }`}
-                        >
-                          <Icon className="w-3 h-3" />
-                          <span>{pos.label}</span>
-                        </button>
-                      );
-                    })}
+                  <div className="flex h-16 w-full items-center justify-center overflow-hidden bg-neutral-950 px-2">
+                    {renderSubtitleContainer(
+                      theme.id,
+                      <>
+                        {renderThemeText(theme.id, theme.sampleWords[0], false)}{" "}
+                        {renderThemeText(theme.id, theme.sampleWords[1], true)}{" "}
+                        {renderThemeText(theme.id, theme.sampleWords[2], false)}
+                      </>,
+                    )}
                   </div>
-                </div>
-
-                {/* Size Segmented Control */}
-                <div className="space-y-1.5">
-                  <label className="text-[11px] font-medium text-muted block">
-                    Font Size
-                  </label>
-                  <div className="grid grid-cols-3 gap-1 bg-surface p-1 rounded-lg border border-border">
-                    {[
-                      { id: "compact" as SubtitleSize, label: "85%" },
-                      { id: "standard" as SubtitleSize, label: "100%" },
-                      { id: "large" as SubtitleSize, label: "120%" },
-                    ].map((s) => {
-                      const isSelected = size === s.id;
-                      return (
-                        <button
-                          type="button"
-                          key={s.id}
-                          onClick={() => onChangeSize(s.id)}
-                          className={`py-1.5 px-2 rounded-md text-[11px] font-medium text-center transition cursor-pointer ${
-                            isSelected
-                              ? "bg-foreground text-background shadow-xs font-semibold"
-                              : "text-muted hover:text-foreground"
-                          }`}
-                        >
-                          {s.label}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                {/* Casing Segmented Control */}
-                <div className="space-y-1.5">
-                  <label className="text-[11px] font-medium text-muted block">
-                    Text Casing
-                  </label>
-                  <div className="grid grid-cols-3 gap-1 bg-surface p-1 rounded-lg border border-border">
-                    {[
-                      { id: "uppercase" as SubtitleCase, label: "ABC" },
-                      { id: "title" as SubtitleCase, label: "Abc" },
-                      { id: "sentence" as SubtitleCase, label: "abc" },
-                    ].map((c) => {
-                      const isSelected = casing === c.id;
-                      return (
-                        <button
-                          type="button"
-                          key={c.id}
-                          onClick={() => onChangeCasing(c.id)}
-                          className={`py-1.5 px-2 rounded-md text-[11px] font-medium text-center transition cursor-pointer ${
-                            isSelected
-                              ? "bg-foreground text-background shadow-xs font-semibold"
-                              : "text-muted hover:text-foreground"
-                          }`}
-                        >
-                          {c.label}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              </div>
-
-              {/* Custom Preview Text Hook Input */}
-              <div className="pt-2 border-t border-border flex items-center gap-2">
-                <Type className="w-3.5 h-3.5 text-muted shrink-0" />
-                <input
-                  type="text"
-                  value={customText}
-                  onChange={(e) => setCustomText(e.target.value)}
-                  placeholder="Type custom test phrase for player preview..."
-                  className="w-full bg-field px-2.5 py-1.5 rounded-md border border-border text-xs text-foreground placeholder:text-muted focus:outline-none focus:border-foreground"
-                />
-              </div>
-            </div>
-
-            {/* Category Filter Tabs */}
-            <div className="flex items-center gap-1 overflow-x-auto pb-0.5 scrollbar-none">
-              {[
-                { id: "all", label: "All" },
-                { id: "viral", label: "Viral" },
-                { id: "pill", label: "Pills" },
-                { id: "neon", label: "Neon" },
-                { id: "cinematic", label: "Cinematic" },
-              ].map((tab) => {
-                const isTabActive = activeCategory === tab.id;
-                return (
-                  <button
-                    type="button"
-                    key={tab.id}
-                    onClick={() => setActiveCategory(tab.id)}
-                    className={`px-2.5 py-1 rounded-md text-xs font-medium transition cursor-pointer whitespace-nowrap ${
-                      isTabActive
-                        ? "bg-foreground text-background font-semibold"
-                        : "bg-surface-secondary text-muted hover:text-foreground"
-                    }`}
-                  >
-                    {tab.label}
-                  </button>
-                );
-              })}
-            </div>
-
-            {/* 13 Native CSS Typography Theme Cards */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-[380px] overflow-y-auto pr-1">
-              {filteredThemes.map((theme) => {
-                const isSelected = selectedTheme === theme.id;
-                return (
-                  <button
-                    type="button"
-                    key={theme.id}
-                    onClick={() => onSelectTheme(theme.id)}
-                    className={`p-2.5 rounded-lg border text-left transition-all cursor-pointer flex flex-col justify-between group ${
-                      isSelected
-                        ? "border-foreground bg-surface-secondary shadow-xs ring-1 ring-foreground/20"
-                        : "border-border bg-surface hover:border-muted hover:bg-surface-secondary/50"
-                    }`}
-                  >
-                    {/* Top Row: Title & Checkmark */}
-                    <div className="flex items-center justify-between gap-1 w-full mb-1.5">
-                      <span className="text-xs font-semibold text-foreground truncate">
-                        {theme.name}
+                  <div className="flex items-center justify-between gap-2 border-t border-separator px-2.5 py-2">
+                    <span className="min-w-0 truncate text-sm font-medium text-foreground">
+                      {theme.name}
+                      <span className="ml-1.5 font-normal text-muted">
+                        {theme.tag}
                       </span>
-
-                      {isSelected ? (
-                        <div className="w-3.5 h-3.5 rounded-full bg-foreground text-background flex items-center justify-center shrink-0">
-                          <Check className="w-2.5 h-2.5 stroke-[3]" />
-                        </div>
-                      ) : (
-                        <div className="flex items-center gap-1">
-                          {theme.colors.map((c, i) => (
-                            <div
-                              key={i}
-                              className="w-1.5 h-1.5 rounded-full border border-black/20"
-                              style={{ backgroundColor: c }}
-                            />
-                          ))}
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Middle: Native CSS Typography Preview Box */}
-                    <div className="w-full py-2.5 px-2 rounded bg-neutral-950 border border-neutral-800 flex items-center justify-center overflow-hidden">
-                      {renderSubtitleContainer(
-                        theme.id,
-                        <>
-                          {renderThemeText(theme.id, theme.sampleWords[0], false)}
-                          {" "}
-                          {renderThemeText(theme.id, theme.sampleWords[1], true)}
-                          {" "}
-                          {renderThemeText(theme.id, theme.sampleWords[2], false)}
-                        </>
-                      )}
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
+                    </span>
+                    {isSelected ? (
+                      <Check className="size-3.5 shrink-0 text-accent" strokeWidth={3} />
+                    ) : (
+                      <span className="flex shrink-0 items-center -space-x-0.5">
+                        {theme.colors.map((c, i) => (
+                          <span
+                            key={i}
+                            className="size-2.5 rounded-full ring-1 ring-surface"
+                            style={{ backgroundColor: c }}
+                          />
+                        ))}
+                      </span>
+                    )}
+                  </div>
+                </button>
+              );
+            })}
           </div>
-        </div>
-      ) : (
-        <div className="p-8 rounded-xl bg-surface-secondary/40 border border-dashed border-border text-center space-y-2">
-          <div className="text-sm font-medium text-foreground">Captions Disabled</div>
-          <p className="text-xs text-muted max-w-md mx-auto">
-            Videos will be cropped to 9:16 vertical without on-screen burned subtitles. Toggle "Burn in captions" above to re-enable animated captions.
-          </p>
-        </div>
-      )}
+        </SectionCard>
+      </div>
     </div>
   );
 };

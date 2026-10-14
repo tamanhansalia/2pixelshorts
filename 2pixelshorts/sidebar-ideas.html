@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sidebar at scale — 4 directions</title>
+<style>
+  :root {
+    --bg: #101014; --panel: #17181d; --panel2: #1d1e24;
+    --border: #2a2b33; --text: #e8e9ec; --muted: #9aa0aa;
+    --blue: #5b9dff; --green: #3fb96c; --amber: #e5a13d;
+    --red: #e05d5d; --gray: #6b7280;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 32px 24px 80px; }
+  header h1 { margin: 0 0 6px; font-size: 22px; letter-spacing: -0.02em; }
+  header p { margin: 0 0 4px; color: var(--muted); max-width: 70ch; }
+  header p b { color: var(--text); font-weight: 600; }
+  .concept {
+    display: grid; grid-template-columns: 300px 340px; gap: 28px;
+    padding: 28px 0; border-top: 1px solid var(--border); margin-top: 28px;
+    align-items: start;
+  }
+  .concept h2 { margin: 0 0 2px; font-size: 16px; }
+  .concept h2 .tag {
+    font-size: 11px; font-weight: 600; color: var(--bg); background: var(--green);
+    border-radius: 20px; padding: 1px 8px; margin-left: 8px; vertical-align: 2px;
+  }
+  .concept .idea { color: var(--muted); font-size: 13px; margin: 6px 0 12px; }
+  .concept ul { margin: 0 0 10px; padding-left: 18px; color: var(--muted); font-size: 13px; }
+  .concept ul li { margin-bottom: 3px; }
+  .concept ul b { color: var(--text); font-weight: 600; }
+  .impl {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 10px 12px; font-size: 12.5px; color: var(--muted);
+  }
+  .impl b { color: var(--text); }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    overflow: hidden; font-size: 13px;
+  }
+  .panel-head {
+    padding: 10px 12px; border-bottom: 1px solid var(--border);
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .panel-head strong { font-size: 13px; }
+  .panel-head span { color: var(--muted); font-size: 11.5px; }
+  .grp-head {
+    width: 100%; display: flex; align-items: center; gap: 8px;
+    background: none; border: 0; color: var(--text); cursor: pointer;
+    padding: 10px 12px 6px; font-size: 12px; font-weight: 600; text-align: left;
+  }
+  .grp-head .chev { color: var(--muted); font-size: 10px; width: 12px; }
+  .grp-head .count {
+    margin-left: auto; font-weight: 600; color: var(--muted);
+    background: var(--panel2); border: 1px solid var(--border);
+    border-radius: 20px; padding: 0 8px; font-size: 11px;
+  }
+  .grp-head .sub { color: var(--muted); font-weight: 400; }
+  .grp.closed .rows { display: none; }
+  .grp.closed .chev { transform: rotate(-90deg); display: inline-block; }
+  .rows { padding: 0 8px 8px; }
+  .row {
+    display: flex; align-items: center; gap: 9px;
+    padding: 7px 8px; border-radius: 8px; position: relative;
+  }
+  .row:hover { background: var(--panel2); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .st-edit { background: var(--gray); } .st-run { background: var(--blue); }
+  .st-ready { background: var(--green); } .st-queue { background: var(--amber); }
+  .st-post { background: transparent; border: 1.5px solid var(--green); width: 7px; height: 7px; }
+  .st-fail { background: var(--red); }
+  .pulse { animation: pulse 1.2s infinite; }
+  @keyframes pulse { 50% { opacity: 0.35; } }
+  .row .txt { min-width: 0; flex: 1; }
+  .row .t { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .s { display: block; color: var(--muted); font-size: 11px; }
+  .del {
+    display: none; border: 0; background: none; color: var(--muted);
+    cursor: pointer; font-size: 14px; padding: 2px 6px; border-radius: 6px;
+  }
+  .row:hover .del { display: block; }
+  .del:hover { color: var(--red); background: rgba(224,93,93,0.12); }
+  .bar { height: 3px; background: var(--border); border-radius: 3px; margin-top: 5px; }
+  .bar i { display: block; height: 100%; background: var(--blue); border-radius: 3px; }
+  .files { display: flex; gap: 4px; margin-top: 4px; flex-wrap: wrap; }
+  .files code {
+    font: 10.5px ui-monospace, monospace; color: var(--muted);
+    background: var(--panel2); border: 1px solid var(--border);
+    border-radius: 5px; padding: 0 5px;
+  }
+  .search {
+    width: calc(100% - 24px); margin: 10px 12px 4px; padding: 7px 10px;
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 8px;
+    color: var(--text); font-size: 13px;
+  }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px; }
+  .chip {
+    border: 1px solid var(--border); background: var(--panel2); color: var(--muted);
+    border-radius: 20px; padding: 2px 10px; font-size: 11.5px; cursor: pointer;
+  }
+  .chip.on { color: var(--text); border-color: var(--blue); }
+  .selbar {
+    display: flex; align-items: center; gap: 10px; padding: 8px 12px;
+    border-top: 1px solid var(--border); color: var(--muted); font-size: 12px;
+  }
+  .selbar button {
+    border: 1px solid var(--border); background: var(--panel2); color: var(--text);
+    border-radius: 8px; padding: 4px 10px; font-size: 12px; cursor: pointer;
+  }
+  .selbar button.danger { color: var(--red); border-color: rgba(224,93,93,0.4); }
+  .selbar button:disabled { opacity: 0.4; cursor: default; }
+  .cbox { accent-color: var(--blue); width: 14px; height: 14px; flex-shrink: 0; }
+  #toast {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(20px);
+    background: var(--panel2); border: 1px solid var(--border); color: var(--text);
+    border-radius: 10px; padding: 8px 16px; font-size: 13px; opacity: 0;
+    transition: opacity 0.2s, transform 0.2s; pointer-events: none;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .take {
+    margin-top: 28px; border: 1px solid rgba(63,185,108,0.4); border-radius: 12px;
+    padding: 16px 18px; background: rgba(63,185,108,0.06); font-size: 13.5px;
+  }
+  @media (max-width: 760px) { .concept { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Sidebar at scale — 4 directions</h1>
+    <p>Same sample week in every mock: <b>14 shorts, ~4 a day</b> across 5 days.
+    Delete rows, collapse groups, search and filter — everything is interactive,
+    so judge each idea by using it, not just looking at it.</p>
+  </header>
+
+  <section class="concept">
+    <div>
+      <h2>A. Group by day</h2>
+      <p class="idea">Your idea: one section per day, newest first. Old days collapse; counts stay visible.</p>
+      <ul>
+        <li><b>Pro:</b> matches how you think ("today's 4 shorts"); old work disappears without deleting.</li>
+        <li><b>Con:</b> one short can still show as two rows (source + rendered output); a rendering short is buried under its day.</li>
+      </ul>
+      <div class="impl"><b>Build:</b> stamp <b>createdAt</b> on each studio draft (backfill from first-seen), add a group-by-day helper, collapsible group headers. Small change.</div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><strong>Sources</strong><span data-count="A"></span></div>
+      <div id="mockA"></div>
+    </div>
+  </section>
+
+  <section class="concept">
+    <div>
+      <h2>B. Group by status</h2>
+      <p class="idea">Rows grouped by what needs you: failed and rendering on top, posted collapsed at the bottom.</p>
+      <ul>
+        <li><b>Pro:</b> fastest to build; the action items are always visible no matter the volume.</li>
+        <li><b>Con:</b> no sense of time; "Ready to post" still grows unbounded at 4 shorts a day.</li>
+      </ul>
+      <div class="impl"><b>Build:</b> regroup the existing sidebar list by status — no new data stored. Smallest change.</div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><strong>Sources</strong><span data-count="B"></span></div>
+      <div id="mockB"></div>
+    </div>
+  </section>
+
+  <section class="concept">
+    <div>
+      <h2>C. One row per short, grouped by day <span class="tag">Recommended</span></h2>
+      <p class="idea">Fixes the actual duplication: source file + rendered output merge into a single row with file chips, then grouped by day like A.</p>
+      <ul>
+        <li><b>Pro:</b> 14 shorts read as 14 rows, not ~20; day groups stay short even as volume grows.</li>
+        <li><b>Con:</b> needs the input-to-output link to be reliable (it is — render history already stores both paths).</li>
+      </ul>
+      <div class="impl"><b>Build:</b> merge rows sharing an input/output link from render history, then group by day as in A. Medium change, kills two problems at once.</div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><strong>Sources</strong><span data-count="C"></span></div>
+      <div id="mockC"></div>
+    </div>
+  </section>
+
+  <section class="concept">
+    <div>
+      <h2>D. Search + filter + bulk cleanup</h2>
+      <p class="idea">Flat compact list with search, status chips, checkboxes and "remove selected". Management tool for heavy days.</p>
+      <ul>
+        <li><b>Pro:</b> scales to any volume; clearing a week's posted shorts takes seconds.</li>
+        <li><b>Con:</b> weakest overview — works best paired with A or C, not alone.</li>
+      </ul>
+      <div class="impl"><b>Build:</b> filter + selection state in the sidebar; reuse the remove logic already shipped. Medium change.</div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><strong>Sources</strong><span data-count="D"></span></div>
+      <input class="search" id="searchD" type="search" placeholder="Search shorts…" aria-label="Search shorts">
+      <div class="chips" id="chipsD"></div>
+      <div id="mockD"></div>
+      <div class="selbar">
+        <span id="selCountD">0 selected</span>
+        <button class="danger" id="rmSelD" disabled>Remove selected</button>
+        <button id="clearPostedD">Clear posted</button>
+      </div>
+    </div>
+  </section>
+
+  <div class="take">
+    <b>My take:</b> build <b>C</b> (one row per short, grouped by day) — it fixes both the duplication
+    and the day-to-day navigation. Add <b>D's search + "clear posted"</b> as phase 2 for heavy weeks.
+    B alone won't survive 4 shorts a day. Tell me which to build and I'll implement it in the app.
+  </div>
+</div>
+<div id="toast" role="status"></div>
+<script>
+const ST = {
+  editing:   { label: "Editing",       cls: "st-edit" },
+  rendering: { label: "Rendering",     cls: "st-run" },
+  ready:     { label: "Ready to post", cls: "st-ready" },
+  queued:    { label: "Queued",        cls: "st-queue" },
+  posted:    { label: "Posted",        cls: "st-post" },
+  failed:    { label: "Failed",        cls: "st-fail" },
+};
+
+// off = days ago. Same 14-short week behind every mock.
+const SHORTS = [
+  { id: "s01", title: "diwali-hook.mp4",      off: 0, time: "9:12 AM",  status: "rendering", prog: 0.62 },
+  { id: "s02", title: "morning-chai.mp4",     off: 0, time: "10:05 AM", status: "editing" },
+  { id: "s03", title: "gym-motivation.mp4",   off: 0, time: "11:40 AM", status: "ready" },
+  { id: "s04", title: "tech-tip-7.mp4",       off: 0, time: "1:15 PM",  status: "queued" },
+  { id: "s05", title: "travel-vlog.mp4",      off: 1, time: "6:02 PM",  status: "posted" },
+  { id: "s06", title: "recipe-reel.mp4",      off: 1, time: "7:30 PM",  status: "posted" },
+  { id: "s07", title: "fitness-day5.mp4",     off: 1, time: "8:44 PM",  status: "ready" },
+  { id: "s08", title: "meme-cut.mp4",         off: 1, time: "9:20 PM",  status: "failed" },
+  { id: "s09", title: "podcast-clip.mp4",     off: 2, time: "5:11 PM",  status: "posted" },
+  { id: "s10", title: "street-food.mp4",      off: 2, time: "7:48 PM",  status: "posted" },
+  { id: "s11", title: "coding-tip.mp4",       off: 2, time: "9:03 PM",  status: "ready" },
+  { id: "s12", title: "sunrise-timelapse.mp4",off: 3, time: "6:26 PM",  status: "posted" },
+  { id: "s13", title: "finance-tip.mp4",      off: 3, time: "8:15 PM",  status: "posted" },
+  { id: "s14", title: "old-draft.mp4",        off: 7, time: "4:40 PM",  status: "editing" },
+];
+
+function dayDate(off) {
+  const d = new Date();
+  d.setDate(d.getDate() - off);
+  return d;
+}
+function dayLabel(off) {
+  if (off === 0) return "Today";
+  if (off === 1) return "Yesterday";
+  if (off < 7) return dayDate(off).toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" });
+  return "Older";
+}
+function daySub(off) {
+  if (off >= 7) return "7+ days ago";
+  return dayDate(off).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+function subFor(it) {
+  if (it.status === "rendering") return "Rendering · " + Math.round(it.prog * 100) + "% · " + it.time;
+  return ST[it.status].label + " · " + it.time;
+}
+
+const gone = new Set();    // deleted ids, shared by all mocks
+const closed = new Set(["B:Posted", "C:4"]); // groups starting collapsed
+const sel = new Set();     // concept D checkbox selection
+let chipD = "all", queryD = "";
+const live = () => SHORTS.filter((s) => !gone.has(s.id));
+
+let toastTimer = null;
+function toast(msg) {
+  const el = document.getElementById("toast");
+  el.textContent = msg;
+  el.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove("show"), 1600);
+}
+
+function rowFlat(it, extra) {
+  const pulse = it.status === "rendering" ? " pulse" : "";
+  const bar = it.status === "rendering"
+    ? '<div class="bar"><i style="width:' + Math.round(it.prog * 100) + '%"></i></div>' : "";
+  return '<div class="row"><span class="dot ' + ST[it.status].cls + pulse + '"></span>' +
+    '<span class="txt"><span class="t">' + it.title + "</span>" +
+    '<span class="s">' + subFor(it) + "</span>" + (extra || "") + bar + "</span>" +
+    '<button class="del" data-del="' + it.id + '" aria-label="Remove ' + it.title + '">×</button></div>';
+}
+
+function groupBlock(concept, key, label, sub, items, rowFn) {
+  const closedCls = closed.has(concept + ":" + key) ? " closed" : "";
+  const rows = items.map(rowFn).join("");
+  return '<div class="grp' + closedCls + '"><button class="grp-head" data-grp="' + concept + ":" + key + '">' +
+    '<span class="chev">▼</span>' + label + ' <span class="sub">' + sub + "</span>" +
+    '<span class="count">' + items.length + "</span></button>" +
+    '<div class="rows">' + rows + "</div></div>";
+}
+
+function counts(key, n) {
+  document.querySelector('[data-count="' + key + '"]').textContent = n + (n === 1 ? " short" : " shorts");
+}
+
+// --- A: group by day ---
+function renderA() {
+  const offs = [...new Set(live().map((s) => s.off))].sort((a, b) => a - b);
+  document.getElementById("mockA").innerHTML = offs.map((off) =>
+    groupBlock("A", off, dayLabel(off), daySub(off),
+      live().filter((s) => s.off === off), (it) => rowFlat(it))).join("");
+  counts("A", live().length);
+}
+
+// --- B: group by status ---
+const B_GROUPS = [
+  ["Attention", ["failed"], "Needs attention"],
+  ["Rendering", ["rendering"], "Rendering now"],
+  ["Ready", ["ready", "queued"], "Ready to post"],
+  ["Editing", ["editing"], "Still editing"],
+  ["Posted", ["posted"], "Done"],
+];
+function renderB() {
+  document.getElementById("mockB").innerHTML = B_GROUPS.map(([key, statuses, label]) => {
+    const items = live().filter((s) => statuses.includes(s.status));
+    if (!items.length) return "";
+    return groupBlock("B", key, label, items.length + (items.length === 1 ? " short" : " shorts"), items, (it) => rowFlat(it));
+  }).join("");
+  counts("B", live().length);
+}
+
+// --- C: one merged row per short, grouped by day ---
+function mergedExtra(it) {
+  if (it.status === "editing" || it.status === "failed") {
+    return '<div class="files"><code>' + it.title + "</code></div>";
+  }
+  const out = it.title.replace(".mp4", "_short.mp4");
+  return '<div class="files"><code>' + it.title + "</code><code>" + out + "</code></div>";
+}
+function renderC() {
+  const offs = [...new Set(live().map((s) => s.off))].sort((a, b) => a - b);
+  document.getElementById("mockC").innerHTML = offs.map((off) =>
+    groupBlock("C", off, dayLabel(off), daySub(off),
+      live().filter((s) => s.off === off), (it) => rowFlat(it, mergedExtra(it)))).join("");
+  counts("C", live().length);
+}
+
+// --- D: search + filter + bulk ---
+const CHIPS = [
+  ["all", "All"], ["work", "Needs work"], ["active", "In progress"],
+  ["ready", "Ready"], ["posted", "Posted"],
+];
+function matchChip(it) {
+  if (chipD === "all") return true;
+  if (chipD === "work") return it.status === "editing" || it.status === "failed";
+  if (chipD === "active") return it.status === "rendering";
+  if (chipD === "ready") return it.status === "ready" || it.status === "queued";
+  if (chipD === "posted") return it.status === "posted";
+  return true;
+}
+function renderChips() {
+  document.getElementById("chipsD").innerHTML = CHIPS.map(([key, label]) =>
+    '<button class="chip' + (chipD === key ? " on" : "") + '" data-chip="' + key + '">' + label + "</button>").join("");
+}
+function renderD() {
+  renderChips();
+  const q = queryD.trim().toLowerCase();
+  const items = live().filter((s) => matchChip(s) && (!q || s.title.toLowerCase().includes(q)));
+  document.getElementById("mockD").innerHTML = '<div class="rows">' + items.map((it) => {
+    const pulse = it.status === "rendering" ? " pulse" : "";
+    const checked = sel.has(it.id) ? " checked" : "";
+    return '<div class="row"><input class="cbox" type="checkbox" data-sel="' + it.id + '"' + checked +
+      ' aria-label="Select ' + it.title + '"><span class="dot ' + ST[it.status].cls + pulse + '"></span>' +
+      '<span class="txt"><span class="t">' + it.title + "</span>" +
+      '<span class="s">' + subFor(it) + "</span></span>" +
+      '<button class="del" data-del="' + it.id + '" aria-label="Remove ' + it.title + '">×</button></div>';
+  }).join("") + "</div>";
+  document.getElementById("selCountD").textContent = sel.size + " selected";
+  document.getElementById("rmSelD").disabled = sel.size === 0;
+  counts("D", items.length);
+}
+
+function renderAll() { renderA(); renderB(); renderC(); renderD(); }
+
+document.addEventListener("click", (e) => {
+  const del = e.target.closest("[data-del]");
+  if (del) {
+    const it = SHORTS.find((s) => s.id === del.dataset.del);
+    gone.add(del.dataset.del);
+    sel.delete(del.dataset.del);
+    toast("Removed " + (it ? it.title : "short"));
+    renderAll();
+    return;
+  }
+  const grp = e.target.closest("[data-grp]");
+  if (grp) {
+    const key = grp.dataset.grp;
+    if (closed.has(key)) closed.delete(key); else closed.add(key);
+    renderAll();
+    return;
+  }
+  const chip = e.target.closest("[data-chip]");
+  if (chip) { chipD = chip.dataset.chip; renderD(); return; }
+  if (e.target.id === "rmSelD" && sel.size) {
+    toast("Removed " + sel.size + (sel.size === 1 ? " short" : " shorts"));
+    sel.forEach((id) => gone.add(id));
+    sel.clear();
+    renderAll();
+    return;
+  }
+  if (e.target.id === "clearPostedD") {
+    const n = live().filter((s) => s.status === "posted").length;
+    live().filter((s) => s.status === "posted").forEach((s) => { gone.add(s.id); sel.delete(s.id); });
+    toast(n ? "Cleared " + n + " posted" : "Nothing posted to clear");
+    renderAll();
+  }
+});
+document.addEventListener("change", (e) => {
+  const box = e.target.closest("[data-sel]");
+  if (!box) return;
+  if (box.checked) sel.add(box.dataset.sel); else sel.delete(box.dataset.sel);
+  renderD();
+});
+document.getElementById("searchD").addEventListener("input", (e) => {
+  queryD = e.target.value;
+  renderD();
+});
+
+renderAll();
+</script>
+</body>
+</html>

@@ -1,17 +1,19 @@
-import React, { useEffect } from "react";
-import { motion, AnimatePresence } from "framer-motion";
-import { X } from "lucide-react";
+import React from "react";
+import { Modal as HeroModal, useOverlayState } from "@heroui/react";
 
 export interface ModalProps {
   isOpen: boolean;
   onClose: () => void;
   title: React.ReactNode;
   description?: React.ReactNode;
+  /** Accepted for API compatibility; dialogs render without a header glyph. */
+  icon?: React.ReactNode;
   children: React.ReactNode;
   footer?: React.ReactNode;
-  maxWidth?: "sm" | "md" | "lg" | "xl";
+  size?: "xs" | "sm" | "md" | "lg";
 }
 
+/** Controlled dialog on HeroUI v3 Modal + useOverlayState. */
 export const Modal: React.FC<ModalProps> = ({
   isOpen,
   onClose,
@@ -19,81 +21,38 @@ export const Modal: React.FC<ModalProps> = ({
   description,
   children,
   footer,
-  maxWidth = "md",
+  size = "md",
 }) => {
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && isOpen) {
-        onClose();
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isOpen, onClose]);
-
-  const maxWClass = {
-    sm: "max-w-md",
-    md: "max-w-lg",
-    lg: "max-w-2xl",
-    xl: "max-w-4xl",
-  }[maxWidth];
+  const state = useOverlayState({
+    isOpen,
+    onOpenChange: (open) => {
+      if (!open) onClose();
+    },
+  });
 
   return (
-    <AnimatePresence>
-      {isOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 font-sans select-none">
-          {/* Subtle Dim Backdrop (No heavy blur slop) */}
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.15 }}
-            onClick={onClose}
-            className="fixed inset-0 bg-background/80"
-          />
-
-          {/* Dialog Container */}
-          <motion.div
-            initial={{ opacity: 0, scale: 0.98, y: 4 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.98, y: 4 }}
-            transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
-            className={`relative w-full ${maxWClass} rounded-lg bg-surface border border-border shadow-xl overflow-hidden z-10 flex flex-col`}
-          >
-            {/* Header */}
-            <div className="flex items-start justify-between p-5 border-b border-border">
-              <div className="space-y-1">
-                <div className="text-sm font-semibold text-foreground tracking-tight">
-                  {title}
-                </div>
+    <HeroModal state={state}>
+      <HeroModal.Backdrop variant="opaque">
+        <HeroModal.Container placement="center" size={size}>
+          <HeroModal.Dialog>
+            <HeroModal.Header>
+              <div className="min-w-0 pr-8">
+                <HeroModal.Heading>{title}</HeroModal.Heading>
                 {description && (
-                  <p className="text-xs text-muted leading-relaxed">{description}</p>
+                  <p className="mt-1 text-sm leading-relaxed text-muted">
+                    {description}
+                  </p>
                 )}
               </div>
-              <button
-                type="button"
-                onClick={onClose}
-                aria-label="Close dialog"
-                className="p-1 rounded text-muted hover:text-foreground hover:bg-surface-secondary transition cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            {/* Body */}
-            <div className="p-5 overflow-y-auto max-h-[70vh] text-xs text-foreground">
-              {children}
-            </div>
-
-            {/* Footer */}
+              <HeroModal.CloseTrigger />
+            </HeroModal.Header>
+            <HeroModal.Body className="pt-2">{children}</HeroModal.Body>
             {footer && (
-              <div className="p-4 border-t border-border bg-surface-secondary/40 flex items-center justify-end gap-2.5">
-                {footer}
-              </div>
+              <HeroModal.Footer className="gap-2">{footer}</HeroModal.Footer>
             )}
-          </motion.div>
-        </div>
-      )}
-    </AnimatePresence>
+          </HeroModal.Dialog>
+        </HeroModal.Container>
+      </HeroModal.Backdrop>
+    </HeroModal>
   );
 };

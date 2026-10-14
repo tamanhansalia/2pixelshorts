@@ -3,46 +3,40 @@ import { Chip as HeroChip } from "@heroui/react";
 
 export interface BadgeProps {
   children: React.ReactNode;
-  variant?: "default" | "success" | "warning" | "danger" | "neutral";
-  size?: "xs" | "sm";
+  variant?: "default" | "accent" | "success" | "warning" | "danger" | "neutral";
+  size?: "sm" | "md";
   dot?: boolean;
   className?: string;
 }
 
+const COLOR_MAP = {
+  default: "default",
+  accent: "accent",
+  success: "success",
+  warning: "warning",
+  danger: "danger",
+  neutral: "default",
+} as const;
+
+/** Status badge built on HeroUI v3 Chip (soft variant). */
 export const Badge: React.FC<BadgeProps> = ({
   children,
   variant = "default",
   size = "sm",
   dot = false,
-  className = "",
+  className,
 }) => {
-  const variantStyles = {
-    default: "bg-surface-secondary text-muted border-border",
-    neutral: "bg-surface-tertiary text-foreground border-border",
-    success: "bg-success/10 text-success border-success/30",
-    warning: "bg-warning/10 text-warning border-warning/30",
-    danger: "bg-danger/10 text-danger border-danger/30",
-  }[variant];
-
-  const dotColor = {
-    default: "bg-muted",
-    neutral: "bg-foreground",
-    success: "bg-success",
-    warning: "bg-warning",
-    danger: "bg-danger",
-  }[variant];
-
-  const sizeStyles = {
-    xs: "text-[10px] px-1.5 py-0.5",
-    sm: "text-[11px] px-2 py-0.5",
-  }[size];
-
   return (
     <HeroChip
-      className={`inline-flex items-center gap-1.5 rounded font-medium border tracking-tight ${sizeStyles} ${variantStyles} ${className}`}
+      color={COLOR_MAP[variant]}
+      variant={variant === "neutral" ? "secondary" : "soft"}
+      size={size}
+      className={className}
     >
-      {dot && <span className={`h-1.5 w-1.5 rounded-full shrink-0 ${dotColor}`} />}
-      <span>{children}</span>
+      {dot && (
+        <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-current" />
+      )}
+      {children}
     </HeroChip>
   );
 };

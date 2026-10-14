@@ -1,17 +1,32 @@
-import { invoke } from "@tauri-apps/api/core";
-import { 
-  CliToolInfo, 
-  CommandOutput, 
-  VideoMetadata, 
-  SocialPublishPayload, 
-  RenderShortParams, 
+import { invoke } from "./invoke.ts";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import type {
+  CliToolInfo,
+  CommandOutput,
+  VideoMetadata,
+  SocialPublishPayload,
+  RenderShortParams,
   ZernioAccount,
-  SeoMetadata
-} from "../types";
+  SeoMetadata,
+  TranscriptionStatus,
+  TrendingResult,
+  VideoReviewReport
+} from "../types/index.ts";
+import {
+  fitTagBudget,
+  normalizeHashtags,
+  scoreSeoPackage,
+  trimTitle,
+} from "./seo.ts";
 
 export const isTauri = () => {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 };
+
+export async function validateApiKey(provider: "zernio" | "elevenlabs" | "youtube", apiKey: string): Promise<void> {
+  if (!isTauri()) throw new Error("Live key verification is available in the desktop app.");
+  await invoke("validate_api_key", { provider, apiKey });
+}
 
 // Fallback mock data matching the user's actual host machine tools
 export const MOCK_TOOLS: CliToolInfo[] = [
@@ -57,17 +72,6 @@ export const MOCK_TOOLS: CliToolInfo[] = [
     is_available: true,
     is_enabled: true,
     description: "xAI Grok terminal CLI for reasoning, scripting, and content generation.",
-    category: "agent",
-  },
-  {
-    id: "gemini",
-    name: "Gemini CLI",
-    command: "gemini",
-    path: "C:\\Users\\Taman\\AppData\\Roaming\\npm\\gemini.cmd",
-    version: "0.49.0",
-    is_available: true,
-    is_enabled: true,
-    description: "Google Gemini CLI for multimodality, fast scripting, and code workflows.",
     category: "agent",
   },
   {
@@ -163,6 +167,7 @@ export async function runCli(command: string, args: string[]): Promise<CommandOu
     code: 0,
     stdout: `[SIMULATED CLI EXECUTION]\n$ ${command} ${args.join(" ")}\nOutput: Process returned exit code 0.\nStatus: Ready for processing.`,
     stderr: "",
+    fallback_used: false,
   };
 }
 
@@ -192,44 +197,52 @@ export async function renderShort(
       outputVideo: params.output_video,
       presetId: params.preset_id,
       agentId: params.agent_id || null,
+      aspectRatio: params.aspect_ratio || null,
       subtitleStyle: params.subtitle_style || null,
       subtitlePosition: params.subtitle_position || null,
       subtitleSize: params.subtitle_size || null,
       subtitleCase: params.subtitle_case || null,
       targetDuration: params.target_duration || null,
+      cutStart: params.cut_start ?? null,
+      cutEnd: params.cut_end ?? null,
       promptHook: params.prompt_hook || null,
       elevenlabsKey: params.elevenlabs_key || null,
       channelContext: params.channel_context || null,
       metaTitle: params.meta_title || null,
       metaDesc: params.meta_desc || null,
       metaTags: params.meta_tags || null,
+      layout: params.layout || null,
+      faceRoi: params.face_roi || null,
     });
   }
   await new Promise((r) => setTimeout(r, 1400));
+  const aspect = params.aspect_ratio || "9:16";
   return {
     success: true,
     code: 0,
-    stdout: `[STAGE 1/4] Probing audio & phrase cues for ${params.input_video}\n[STAGE 2/4] AI Agent (${(params.agent_id || "claude").toUpperCase()}) selected viral cuts with auto sentence boundary completion\n[STAGE 3/4] Trimming dead pauses & baking 30ms anti-pop crossfades\n[STAGE 4/4] 9:16 Vertical crop, ${params.preset_id} grade & ${params.subtitle_style === "none" ? "clean video" : `${params.subtitle_style || "pop"} subtitles (${params.subtitle_position || "bottom"}, ${params.subtitle_size || "standard"})`}\n[AI SEO] Embedded title "${params.meta_title || "Auto AI Title"}" & metadata package into MP4\n[COMPLETE] 9:16 Short rendered: ${params.output_video}`,
+    stdout: `[STAGE 1/4] Probing audio & phrase cues for ${params.input_video}\n[STAGE 2/4] AI Agent (${(params.agent_id || "claude").toUpperCase()}) selected viral cuts with auto sentence boundary completion\n[STAGE 3/4] Trimming dead pauses & baking 30ms anti-pop crossfades\n[STAGE 4/4] ${aspect} crop, ${params.preset_id} grade & ${params.subtitle_style === "none" ? "clean video" : `${params.subtitle_style || "pop"} subtitles (${params.subtitle_position || "bottom"}, ${params.subtitle_size || "standard"})`}\n[AI SEO] Embedded title "${params.meta_title || "Auto AI Title"}" & metadata package into MP4\n[COMPLETE] ${aspect} Short rendered: ${params.output_video}`,
     stderr: `video-use engine: cuts extracted, 30ms crossfade applied, SEO metadata embedded.`,
+    fallback_used: false,
   };
 }
 
 export async function generateSeoMetadata(
   inputVideo: string,
   channelContext?: string,
-  agentId?: string
+  agentId?: string,
+  elevenlabsKey?: string,
 ): Promise<SeoMetadata> {
   if (isTauri()) {
-    try {
-      const raw = await invoke<string>("generate_seo_metadata", {
-        inputVideo,
-        channelContext: channelContext || null,
-        agentId: agentId || null,
-      });
-      return JSON.parse(raw);
-    } catch (err) {
-      console.warn("Tauri generate_seo_metadata call failed, using fallback:", err);
-    }
+    // Desktop: the video-use engine transcribes the source and (for a named
+    // agent) has the agent CLI write the package. Failures reject so the UI
+    // shows an honest empty state — never template text.
+    const raw = await invoke<string>("generate_seo_metadata", {
+      inputVideo,
+      channelContext: channelContext || null,
+      agentId: agentId || null,
+      elevenlabsKey: elevenlabsKey || null,
+    });
+    return JSON.parse(raw);
   }
 
   // High-fidelity fallback algorithm
@@ -256,47 +269,148 @@ export async function generateSeoMetadata(
   const alt2 = `This New ${topic} Feels Like Cheating ⚡`;
   const alt3 = `How to Master ${topic} in 60 Seconds 🚀`;
 
-  const tags = [
+  // Tag bench + hashtags through the shared SEO core so the browser
+  // preview follows the same budget and normalization rules as the engine.
+  const tags = fitTagBudget([
     topic.toLowerCase(),
+    `${topic.toLowerCase()} tutorial`,
+    `${topic.toLowerCase()} shorts`,
     "shorts",
     "tech",
     "coding",
     "developer",
     "software engineering",
-    `${topic.toLowerCase()} tutorial`,
+    `${topic.toLowerCase()} tips`,
     "ai tools",
     "productivity",
     "webdev",
     "programming tips",
-    "trending"
-  ];
+    "short",
+    "how to",
+    "beginners guide",
+    "explained",
+    "crash course",
+  ]);
 
-  const hashtags = tags.slice(0, 6).map((t) => `#${t.replace(/\s+/g, "")}`);
+  const hashtags = normalizeHashtags(tags);
 
   const channelNiche = channelContext ? channelContext.trim() : "daily tech & developer guides";
-
-  return {
-    title: alt2,
-    title_alternatives: [primaryTitle, alt1, alt2, alt3],
-    description: `The complete breakdown on ${topic}! In this short, we review the entire workflow from start to finish.\n\n📌 Key Highlights:\n• Core breakthrough with ${topic}\n• How to optimize performance and save hours\n• Pro tips for modern creators\n\n👉 Subscribe to our channel for ${channelNiche}!\n\n🔍 Search Keywords:\n${tags.join(", ")}\n\n${hashtags.join(" ")}`,
+  const hook = `Stop doing this with ${topic} — here is what top engineers do instead.`;
+  const overview =
+    `The complete breakdown on ${topic}! In this short, we review the entire workflow from start to finish.\n\n` +
+    `👉 Subscribe to our channel for ${channelNiche}!`;
+  const highlights = [
+    `Core breakthrough with ${topic}`,
+    "How to optimize performance and save hours",
+    "Pro tips for modern creators",
+  ];
+  const description =
+    `${hook}\n\n${overview}\n\n📌 Key Highlights:\n` +
+    highlights.map((h) => `• ${h}`).join("\n") +
+    `\n\n🔍 Search Keywords:\n${tags.join(", ")}\n\n${hashtags.join(" ")}`;
+  const keywords = [topic.toLowerCase(), "workflow", "optimization", "productivity"];
+  // Honest package-quality score from the shared scorer — never a fixed
+  // near-perfect figure for ungrounded preview copy.
+  const quality = scoreSeoPackage(
+    alt2,
+    description,
     tags,
     hashtags,
-    seo_score: 98,
-    keywords_analyzed: [topic.toLowerCase(), "workflow", "optimization", "productivity"],
+    keywords,
+    0,
+  );
+
+  return {
+    title: trimTitle(alt2),
+    title_alternatives: [primaryTitle, alt1, alt2, alt3].map((t) => trimTitle(t)),
+    description,
+    tags,
+    hashtags,
+    seo_score: quality.score,
+    quality_score: quality.qualityScore,
+    quality_checks: quality.checks,
+    keywords_analyzed: keywords,
     review_report: {
-      overall_summary: `Reviewed whole video recording (${filename}). Audio pacing is crisp with high speech density focused on ${topic}. Identified core breakthrough and practical implementation steps.`,
+      overall_summary: `Preview package for ${filename} (browser preview — no transcript analyzed). Audio pacing and hooks will be measured from the real recording on desktop.`,
       hook_detected: `Stop doing this with ${topic} - here is what top engineers do instead.`,
       content_highlights: [
         `Core breakthrough and architecture breakdown of ${topic}`,
-        `Performance benchmarks and speed optimizations`,
-        `Real-world edge cases to avoid when deploying`,
-        `Actionable steps to set this up in under 60 seconds`
+        "Performance benchmarks and speed optimizations",
+        "Real-world edge cases to avoid when deploying",
+        "Actionable steps to set this up in under 60 seconds"
       ],
-      retention_score: 97,
+      retention_score: quality.score,
       target_audience: `Engineers, developers, and tech builders aligned with your channel profile.`,
       suggested_pacing: "Fast-paced punchy cuts with 30ms anti-pop crossfades",
-      word_count: 142
+      word_count: 0
     }
+  };
+}
+
+/**
+ * Report which transcription engine analysis would use. Desktop probes
+ * the real interpreter; the browser fallback can only reflect the key.
+ */
+export async function probeTranscription(
+  elevenlabsKey?: string,
+): Promise<TranscriptionStatus> {
+  if (isTauri()) {
+    return await invoke<TranscriptionStatus>("probe_transcription", {
+      elevenlabsKey: elevenlabsKey?.trim() ? elevenlabsKey.trim() : null,
+    });
+  }
+  const keyConfigured = !!elevenlabsKey?.trim();
+  return {
+    elevenlabs_key_configured: keyConfigured,
+    local_available: false,
+    local_model: "tiny.en",
+    ffmpeg_available: false,
+    active_engine: keyConfigured ? "elevenlabs" : "none",
+  };
+}
+
+export async function reviewRender(
+  outputVideo: string,
+  channelContext?: string,
+): Promise<VideoReviewReport> {
+  if (isTauri()) {
+    const raw = await invoke<string>("review_render", {
+      outputVideo,
+      channelContext: channelContext || null,
+    });
+    return JSON.parse(raw);
+  }
+  // Browser preview: no rendered file exists, reuse the SEO analysis report.
+  const meta = await generateSeoMetadata(outputVideo, channelContext);
+  if (!meta.review_report) throw new Error("No review report available");
+  return meta.review_report;
+}
+
+export async function fetchTrending(
+  niche: string,
+  apiKey?: string,
+): Promise<TrendingResult> {
+  if (isTauri()) {
+    return await invoke<TrendingResult>("fetch_trending", {
+      niche,
+      apiKey: apiKey || null,
+    });
+  }
+  // Browser preview: clearly-marked sample terms, no network involved.
+  await new Promise((r) => setTimeout(r, 500));
+  return {
+    niche,
+    keywords: [
+      { term: "rust async", score: 9.5, sources: 4 },
+      { term: "connection pooling", score: 7.0, sources: 3 },
+      { term: "ai agents", score: 6.5, sources: 3 },
+      { term: "shorts", score: 6.0, sources: 5 },
+      { term: "tauri v2", score: 4.5, sources: 2 },
+    ],
+    videos: [],
+    fetched_at: new Date().toISOString(),
+    cached: false,
+    note: "simulated",
   };
 }
 
@@ -332,12 +446,32 @@ export async function getZernioConnectUrl(apiKey: string, platform: string): Pro
   return `https://zernio.com/app/connect/${platform.toLowerCase()}`;
 }
 
+/**
+ * Open a URL in the user's default browser. `window.open` silently dies
+ * inside the Tauri webview, so the desktop path goes through the opener
+ * plugin (already granted via `opener:default`). Rejects with the URL in
+ * the message so callers can show it for manual copy-paste.
+ */
 export async function openExternalUrl(url: string): Promise<void> {
-  if (isTauri()) {
-    await invoke("open_external_url", { url });
-  } else {
-    window.open(url, "_blank");
+  const parsed = new URL(url);
+  if (parsed.protocol !== "https:" || parsed.username || parsed.password) {
+    throw new Error("External links must use HTTPS without embedded credentials");
   }
+  if (isTauri()) {
+    try {
+      await openUrl(url);
+    } catch (err: unknown) {
+      throw new Error(
+        `Could not open browser for ${url}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    return;
+  }
+  if (typeof window !== "undefined" && typeof window.open === "function") {
+    window.open(url, "_blank", "noopener,noreferrer");
+    return;
+  }
+  throw new Error(`Could not open browser for ${url}: no window available`);
 }
 
 export async function publishToZernio(
@@ -356,11 +490,34 @@ export async function publishToZernio(
         : `Post scheduled for ${payload.scheduled_for} (${payload.timezone})`,
       platforms: payload.platforms,
       account_ids: payload.account_ids,
-      post_id: `post_zr_${Date.now()}`,
+      tags: payload.tags,
+      post: { _id: `post_zr_${Date.now()}` },
     },
     null,
     2
   );
+}
+
+export async function getPostStatus(
+  apiKey: string,
+  postId: string,
+): Promise<string> {
+  if (isTauri()) {
+    return await invoke<string>("get_post_status", { apiKey, postId });
+  }
+  await new Promise((r) => setTimeout(r, 300));
+  return JSON.stringify({ post: { _id: postId, status: "scheduled" } });
+}
+
+export async function retryPost(
+  apiKey: string,
+  postId: string,
+): Promise<string> {
+  if (isTauri()) {
+    return await invoke<string>("retry_post", { apiKey, postId });
+  }
+  await new Promise((r) => setTimeout(r, 300));
+  return JSON.stringify({ post: { _id: postId, status: "publishing" } });
 }
 
 export async function pickVideoFile(): Promise<string | null> {

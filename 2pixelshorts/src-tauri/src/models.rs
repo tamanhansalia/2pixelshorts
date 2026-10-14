@@ -19,6 +19,10 @@ pub struct CommandOutput {
     pub code: i32,
     pub stdout: String,
     pub stderr: String,
+    /// Legacy stored results may describe a direct-ffmpeg fallback.
+    /// New jobs report pipeline failures instead of exporting the whole source.
+    #[serde(default)]
+    pub fallback_used: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,8 +46,8 @@ pub struct VideoPreset {
     pub height: u32,
     pub fps: u32,
     pub color_grade: String, // "warm_cinematic", "neutral_punch", "none"
-    pub subtitle_style: String, // "bold_overlay", "natural_sentence", "none"
-    pub subtitle_case: String, // "uppercase", "natural"
+    pub subtitle_style: String, // caption theme id (pop, boxed, ...) or "none"
+    pub subtitle_case: String, // "uppercase", "title", "sentence"
     pub silence_threshold_s: f64,
 }
 
@@ -57,6 +61,40 @@ pub struct ZernioAccount {
     pub is_connected: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum JobStatus {
+    Queued,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobInfo {
+    pub id: String,
+    pub kind: String,
+    pub status: JobStatus,
+    pub progress: f32,
+    pub stage: String,
+    pub input_video: String,
+    pub output_video: String,
+    pub created_at: String,
+    pub finished_at: Option<String>,
+    pub result: Option<CommandOutput>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobProgressEvent {
+    pub job_id: String,
+    pub progress: f32,
+    pub stage: String,
+    pub line: String,
+    pub done: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SocialPublishPayload {
     pub title: String,
@@ -67,5 +105,10 @@ pub struct SocialPublishPayload {
     pub timezone: Option<String>,
     pub publish_now: bool,
     pub account_ids: Option<Vec<String>>,
+    pub tags: Option<Vec<String>>,
+    pub media_url: Option<String>, // public video URL: skips the upload step
+    /// Queue entry id, sent as `Idempotency-Key` so gateway retries are safe.
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
 }
 

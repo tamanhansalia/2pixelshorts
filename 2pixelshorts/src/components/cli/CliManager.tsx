@@ -1,26 +1,30 @@
-import React, { useState } from "react";
-import { AnimatePresence } from "framer-motion";
-import { 
-  Terminal, 
-  RefreshCw, 
-  Plus, 
-  Check, 
-  Play, 
-  Trash2, 
-  Bot, 
-  Layers, 
-  Video, 
-  Sparkles, 
-  Code2,
-  Loader2,
+import { parseCliArguments } from "../../lib/cliArgs";
+import React, { useEffect, useState } from "react";
+import {
+  Check,
+  Copy,
+  Play,
+  Plus,
+  RefreshCw,
   Search,
-  Copy
+  Terminal,
+  Trash2,
 } from "lucide-react";
+import {
+  Label,
+  ListBox,
+  Select,
+  Spinner,
+  Switch,
+} from "@heroui/react";
 import { CliToolInfo, CommandOutput } from "../../types";
-import { ToolCardSkeleton } from "../ui/Skeleton";
+import { ToolRowSkeleton } from "../ui/Skeleton";
 import { Button } from "../ui/Button";
 import { Badge } from "../ui/Badge";
 import { Modal } from "../ui/Modal";
+import { Field, TextInput } from "../ui/Field";
+import { EmptyState } from "../ui/EmptyState";
+import { Segmented } from "../ui/Segmented";
 
 interface CliManagerProps {
   tools: CliToolInfo[];
@@ -31,6 +35,8 @@ interface CliManagerProps {
   onAddCustomTool: (name: string, pathOrCmd: string) => Promise<void>;
   onRunCommand: (command: string, args: string[]) => Promise<CommandOutput>;
 }
+
+const ARG_PRESETS = ["--version", "--help", "-v", "status"];
 
 export const CliManager: React.FC<CliManagerProps> = ({
   tools,
@@ -54,6 +60,10 @@ export const CliManager: React.FC<CliManagerProps> = ({
   const [isRunning, setIsRunning] = useState(false);
   const [cmdResult, setCmdResult] = useState<CommandOutput | null>(null);
   const [copiedOutput, setCopiedOutput] = useState(false);
+  const selectedToolEnabled = tools.some((tool) => tool.command === selectedTool && tool.is_available && tool.is_enabled);
+  useEffect(() => {
+    if (!selectedToolEnabled) setSelectedTool(tools.find((tool) => tool.is_available && tool.is_enabled)?.command ?? "");
+  }, [tools, selectedToolEnabled]);
 
   const handleAddCustom = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -70,18 +80,19 @@ export const CliManager: React.FC<CliManagerProps> = ({
   };
 
   const handleExecute = async () => {
-    if (!selectedTool) return;
+    if (!selectedToolEnabled) return;
     setIsRunning(true);
     try {
-      const argsArray = cmdArgs.trim() ? cmdArgs.split(" ") : [];
+      const argsArray = parseCliArguments(cmdArgs);
       const res = await onRunCommand(selectedTool, argsArray);
       setCmdResult(res);
-    } catch (err: any) {
+    } catch (err: unknown) {
       setCmdResult({
         success: false,
         code: -1,
         stdout: "",
-        stderr: err?.toString() || "Execution failed",
+        stderr: err instanceof Error ? err.message : "Execution failed",
+        fallback_used: false,
       });
     } finally {
       setIsRunning(false);
@@ -106,20 +117,9 @@ export const CliManager: React.FC<CliManagerProps> = ({
     setTimeout(() => setCopiedOutput(false), 2000);
   };
 
-  const agentCount = tools.filter((t) => t.category === "agent" && t.is_available).length;
-  const mediaCount = tools.filter((t) => t.category === "media" && t.is_available).length;
-  const availableCount = tools.filter((t) => t.is_available && t.is_enabled).length;
+  const runnableTools = tools.filter((t) => t.is_available && t.is_enabled);
 
-  const filteredTools = tools.filter((t) => {
-    const matchesFilter =
-      activeFilter === "all" ||
-      (activeFilter === "agent" && t.category === "agent") ||
-      (activeFilter === "media" && t.category === "media") ||
-      (activeFilter === "runtime" && (t.category === "runtime" || t.category === "animation")) ||
-      (activeFilter === "custom" && t.category === "custom");
-
-    if (!matchesFilter) return false;
-
+  const matchesSearch = (t: CliToolInfo) => {
     if (!searchQuery.trim()) return true;
     const query = searchQuery.toLowerCase();
     return (
@@ -127,387 +127,452 @@ export const CliManager: React.FC<CliManagerProps> = ({
       t.command.toLowerCase().includes(query) ||
       (t.description && t.description.toLowerCase().includes(query))
     );
-  });
+  };
+
+  const matchesFilter = (t: CliToolInfo) =>
+    activeFilter === "all" ||
+    (activeFilter === "agent" && t.category === "agent") ||
+    (activeFilter === "media" && t.category === "media") ||
+    (activeFilter === "runtime" &&
+      (t.category === "runtime" || t.category === "animation")) ||
+    (activeFilter === "custom" && t.category === "custom");
+
+  const filteredTools = tools.filter((t) => matchesFilter(t) && matchesSearch(t));
+
+  const filterTabs = [
+    { value: "all", label: "All", count: tools.length },
+    {
+      value: "agent",
+      label: "Agents",
+      count: tools.filter((t) => t.category === "agent").length,
+    },
+    {
+      value: "media",
+      label: "Media",
+      count: tools.filter((t) => t.category === "media").length,
+    },
+    {
+      value: "runtime",
+      label: "Runtimes",
+      count: tools.filter(
+        (t) => t.category === "runtime" || t.category === "animation",
+      ).length,
+    },
+    {
+      value: "custom",
+      label: "Custom",
+      count: tools.filter((t) => t.category === "custom").length,
+    },
+  ];
+
+  // Category sections shown when the "All" tab is active.
+  const toolGroups = [
+    {
+      id: "agent",
+      label: "Agents",
+      tools: tools.filter(
+        (t) => t.category === "agent" && matchesSearch(t),
+      ),
+    },
+    {
+      id: "media",
+      label: "Media",
+      tools: tools.filter(
+        (t) => t.category === "media" && matchesSearch(t),
+      ),
+    },
+    {
+      id: "runtime",
+      label: "Runtimes",
+      tools: tools.filter(
+        (t) =>
+          (t.category === "runtime" || t.category === "animation") &&
+          matchesSearch(t),
+      ),
+    },
+    {
+      id: "custom",
+      label: "Custom",
+      tools: tools.filter(
+        (t) => t.category === "custom" && matchesSearch(t),
+      ),
+    },
+  ].filter((g) => g.tools.length > 0);
+
+  const renderToolRow = (tool: CliToolInfo) => {
+    const isActive = tool.is_available && tool.is_enabled;
+    return (
+      <div
+        key={tool.id}
+        className={`group flex items-center gap-3 px-4 py-2.5 transition-colors hover:bg-surface-secondary ${
+          tool.is_available ? "" : "opacity-55"
+        }`}
+      >
+        <span
+          title={
+            tool.is_available
+              ? tool.is_enabled
+                ? "Active"
+                : "Disabled"
+              : "Not in PATH"
+          }
+          aria-hidden
+          className={`size-1.5 shrink-0 rounded-full ${
+            isActive ? "bg-success" : "bg-border-tertiary"
+          }`}
+        />
+        <div className="min-w-0 flex-1 leading-snug">
+          <div className="flex min-w-0 items-baseline gap-2">
+            <span className="truncate text-sm font-medium text-foreground">
+              {tool.name}
+            </span>
+            <code className="shrink-0 font-mono text-xs text-muted">
+              {tool.command}
+            </code>
+          </div>
+          <p className="truncate text-xs text-muted">
+            {tool.description || tool.path || "No description"}
+          </p>
+        </div>
+        <span className="tabular-nums hidden w-40 shrink-0 truncate text-right font-mono text-xs text-muted md:block">
+          {tool.is_available ? tool.version || "Installed" : "Not in PATH"}
+        </span>
+        <span className="flex shrink-0 items-center gap-0.5">
+          {tool.category === "custom" && (
+            <Button
+              variant="ghost"
+              iconOnly
+              icon={<Trash2 />}
+              onClick={() => onRemoveTool(tool.id)}
+              aria-label={`Remove ${tool.name}`}
+              title="Remove tool"
+            />
+          )}
+          {tool.is_available ? (
+            <>
+              <Button
+                variant="ghost"
+                iconOnly
+                icon={<Play />}
+                onClick={() => handleSelectToolForRun(tool.command)}
+                aria-label={`Test ${tool.name} in console`}
+                disabled={!tool.is_enabled}
+                title="Run test command"
+              />
+              <Switch
+                size="sm"
+                isSelected={tool.is_enabled}
+                onChange={() => onToggleTool(tool.id)}
+                aria-label={`${tool.is_enabled ? "Exclude" : "Include"} ${tool.name} ${tool.is_enabled ? "from" : "in"} console`}
+              >
+                <Switch.Content>
+                  <Switch.Control>
+                    <Switch.Thumb />
+                  </Switch.Control>
+                </Switch.Content>
+              </Switch>
+            </>
+          ) : (
+            <span className="px-2 text-xs text-muted">Not found</span>
+          )}
+        </span>
+      </div>
+    );
+  };
 
   return (
-    <div className="space-y-4 max-w-6xl mx-auto font-sans select-none">
-      {/* Top Action Bar */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3 rounded-lg bg-surface border border-border">
-        <div className="flex items-center gap-2.5">
-          <div className="h-6 w-6 rounded bg-surface-secondary border border-border flex items-center justify-center text-foreground shrink-0">
-            <Terminal className="w-3.5 h-3.5" />
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="text-xs font-semibold text-foreground tracking-tight">
-              CLI Tools & Agents
-            </span>
-            <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-surface-secondary text-muted border border-border">
-              {availableCount}/{tools.length} active
-            </span>
-          </div>
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center">
+          <Segmented
+            label="Filter tools by category"
+            value={activeFilter}
+            onChange={setActiveFilter}
+            options={filterTabs.map((tab) => ({
+              value: tab.value,
+              label: (
+                <>
+                  {tab.label}
+                  <span className="tabular-nums text-xs text-muted">{tab.count}</span>
+                </>
+              ),
+            }))}
+          />
         </div>
-
-        <div className="flex items-center gap-2 self-end sm:self-auto">
+        {/* Search + actions stay together so a wrap moves them as one row. */}
+        <div className="flex min-w-0 items-center gap-2">
+          <label className="relative block w-52 min-w-0">
+            <Search className="pointer-events-none absolute top-1/2 left-2.5 z-10 size-3.5 -translate-y-1/2 text-muted" />
+            <TextInput
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search tools"
+              aria-label="Search tools"
+              className="pl-8"
+            />
+          </label>
           <Button
             variant="secondary"
-            size="xs"
-            icon={<RefreshCw className={`w-3 h-3 ${isLoading ? "animate-spin" : ""}`} />}
-            onClick={onRefresh}
             isLoading={isLoading}
+            icon={<RefreshCw />}
+            onClick={onRefresh}
           >
-            Rescan PATH
+            Rescan
           </Button>
           <Button
             variant="primary"
-            size="xs"
-            icon={<Plus className="w-3 h-3" />}
+            icon={<Plus />}
             onClick={() => setShowAddModal(true)}
           >
-            Add Binary
+            Add tool
           </Button>
         </div>
       </div>
 
-      {/* Filter and Search Bar */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-2.5">
-        {/* Category Filter Pills */}
-        <div className="flex items-center gap-1 overflow-x-auto pb-1 md:pb-0 scrollbar-none">
-          {[
-            { id: "all", label: "All Tools", icon: Layers, count: tools.length },
-            { id: "agent", label: "AI Agents", icon: Bot, count: agentCount },
-            { id: "media", label: "Media Engines", icon: Video, count: mediaCount },
-            { id: "runtime", label: "Runtimes", icon: Sparkles },
-            { id: "custom", label: "Custom", icon: Code2 },
-          ].map((tab) => {
-            const Icon = tab.icon;
-            const isActive = activeFilter === tab.id;
-            return (
-              <button
-                key={tab.id}
-                onClick={() => setActiveFilter(tab.id)}
-                className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium transition-colors cursor-pointer outline-none whitespace-nowrap ${
-                  isActive
-                    ? "bg-foreground text-background font-semibold"
-                    : "bg-surface text-muted hover:text-foreground border border-border"
-                }`}
-              >
-                <Icon className="w-3 h-3" />
-                <span>{tab.label}</span>
-                {"count" in tab && (
-                  <span className={`text-[10px] font-mono opacity-80`}>
-                    ({tab.count})
-                  </span>
-                )}
-              </button>
-            );
-          })}
+      {/* Tool register */}
+      {isLoading ? (
+        <div className="divide-y divide-separator overflow-hidden rounded-3xl bg-surface shadow-surface">
+          <ToolRowSkeleton />
+          <ToolRowSkeleton />
+          <ToolRowSkeleton />
+          <ToolRowSkeleton />
+          <ToolRowSkeleton />
         </div>
-
-        {/* Search input */}
-        <div className="relative w-full md:w-64">
-          <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted" />
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search tools or commands..."
-            className="w-full pl-8 pr-3 py-1 rounded-md bg-field border border-border text-xs text-foreground placeholder:text-muted focus:outline-none focus:border-foreground"
+      ) : filteredTools.length === 0 ? (
+        <div className="overflow-hidden rounded-3xl bg-surface shadow-surface">
+          <EmptyState
+            icon={<Terminal className="size-5" />}
+            title="No tools found"
+            description="No binaries match the current filter or search."
           />
         </div>
-      </div>
-
-      {/* Tools Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2.5">
-        {isLoading ? (
-          <>
-            <ToolCardSkeleton />
-            <ToolCardSkeleton />
-            <ToolCardSkeleton />
-            <ToolCardSkeleton />
-            <ToolCardSkeleton />
-            <ToolCardSkeleton />
-          </>
-        ) : filteredTools.length === 0 ? (
-          <div className="col-span-full py-12 text-center rounded-lg bg-surface border border-border space-y-2">
-            <div className="h-8 w-8 rounded-md bg-surface-secondary border border-border flex items-center justify-center mx-auto text-muted">
-              <Terminal className="w-4 h-4 text-foreground" />
-            </div>
-            <div className="text-xs font-semibold text-foreground">No CLI Tools Found</div>
-            <p className="text-[11px] text-muted max-w-sm mx-auto">
-              No binaries match your current filter or search criteria.
-            </p>
-          </div>
-        ) : (
-          <AnimatePresence>
-            {filteredTools.map((tool) => {
-              const isAgent = tool.category === "agent";
-              const isMedia = tool.category === "media";
-              const CategoryIcon = isAgent ? Bot : isMedia ? Video : tool.category === "custom" ? Code2 : Sparkles;
-
-              return (
-                <div
-                  key={tool.id}
-                  className={`p-3 rounded-lg border transition-colors flex flex-col justify-between ${
-                    tool.is_available && tool.is_enabled
-                      ? "bg-surface border-border hover:border-muted/80"
-                      : !tool.is_available
-                      ? "bg-surface-secondary/40 border-border/50 opacity-60"
-                      : "bg-surface-secondary border-border opacity-70"
-                  }`}
-                >
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2 min-w-0">
-                        <div className="h-6 w-6 rounded bg-surface-secondary border border-border flex items-center justify-center text-foreground shrink-0">
-                          <CategoryIcon className="w-3.5 h-3.5" />
-                        </div>
-                        <div className="min-w-0">
-                          <span className="font-semibold text-foreground text-xs truncate block">
-                            {tool.name}
-                          </span>
-                          <span className="text-[10px] font-mono text-muted block truncate">
-                            ${tool.command}
-                          </span>
-                        </div>
-                      </div>
-
-                      <div className="flex items-center gap-1 shrink-0">
-                        {tool.category === "custom" && (
-                          <button
-                            type="button"
-                            onClick={() => onRemoveTool(tool.id)}
-                            aria-label="Remove tool"
-                            className="p-1 rounded text-muted hover:text-danger transition cursor-pointer"
-                          >
-                            <Trash2 className="w-3 h-3" />
-                          </button>
-                        )}
-                        {tool.is_available && (
-                          <button
-                            type="button"
-                            onClick={() => onToggleTool(tool.id)}
-                            className={`text-[10px] px-2 py-0.5 rounded border transition-colors cursor-pointer ${
-                              tool.is_enabled
-                                ? "bg-foreground text-background border-foreground font-semibold"
-                                : "border-border text-muted bg-surface-secondary hover:text-foreground"
-                            }`}
-                          >
-                            {tool.is_enabled ? "Enabled" : "Disabled"}
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="mt-2.5 pt-2 border-t border-border/60 flex items-center justify-between text-[11px]">
-                    <div className="flex items-center gap-1.5 min-w-0">
-                      <span className={`h-1.5 w-1.5 rounded-full shrink-0 ${tool.is_available ? "bg-success" : "bg-muted"}`} />
-                      <span className={`text-[10px] font-mono truncate max-w-[130px] ${tool.is_available ? "text-foreground" : "text-muted"}`}>
-                        {tool.is_available ? (tool.version || "Installed") : "Not in PATH"}
-                      </span>
-                    </div>
-
-                    {tool.is_available && (
-                      <button
-                        type="button"
-                        onClick={() => handleSelectToolForRun(tool.command)}
-                        className="text-[10px] text-muted hover:text-foreground flex items-center gap-1 cursor-pointer font-medium"
-                      >
-                        <Play className="w-2.5 h-2.5 fill-current" />
-                        <span>Run Test</span>
-                      </button>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
-          </AnimatePresence>
-        )}
-      </div>
-
-      {/* Terminal Console Runner */}
-      <div id="cli-runner-console" className="p-4 rounded-lg bg-surface border border-border space-y-3">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <span className="h-1.5 w-1.5 rounded-full bg-success" />
-            <h2 className="text-xs font-semibold text-foreground tracking-tight">
-              Direct CLI Terminal Execution
-            </h2>
-          </div>
-          <div className="flex items-center gap-1 text-[11px] text-muted">
-            <span className="hidden sm:inline">Presets:</span>
-            {["--version", "--help", "-v", "status"].map((preset) => (
-              <button
-                key={preset}
-                type="button"
-                onClick={() => setCmdArgs(preset)}
-                className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-surface-secondary hover:bg-surface-tertiary text-foreground border border-border cursor-pointer transition"
-              >
-                {preset}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
-          <div className="sm:col-span-1">
-            <select
-              value={selectedTool}
-              onChange={(e) => setSelectedTool(e.target.value)}
-              className="w-full px-2.5 py-1.5 rounded-md bg-field border border-border text-xs text-foreground focus:outline-none focus:border-foreground font-mono"
+      ) : activeFilter === "all" ? (
+        <div className="overflow-hidden rounded-3xl bg-surface shadow-surface">
+          {toolGroups.map((group, gi) => (
+            <div
+              key={group.id}
+              className={gi > 0 ? "border-t border-separator" : undefined}
             >
-              {tools
-                .filter((t) => t.is_available && t.is_enabled)
-                .map((t) => (
-                  <option key={t.id} value={t.command}>
-                    {t.command} ({t.name})
-                  </option>
-                ))}
-            </select>
-          </div>
-
-          <div className="sm:col-span-2">
-            <div className="relative">
-              <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted font-mono text-xs">
-                $
-              </span>
-              <input
-                type="text"
-                value={cmdArgs}
-                onChange={(e) => setCmdArgs(e.target.value)}
-                placeholder="Arguments (e.g. --version or --help)"
-                className="w-full pl-6 pr-3 py-1.5 rounded-md text-xs bg-field border border-border text-foreground placeholder:text-muted focus:outline-none focus:border-foreground font-mono"
-              />
-            </div>
-          </div>
-
-          <div className="sm:col-span-1">
-            <Button
-              variant="primary"
-              size="sm"
-              fullWidth
-              isLoading={isRunning}
-              disabled={isRunning || !selectedTool}
-              icon={<Play className="w-3 h-3 fill-current" />}
-              onClick={handleExecute}
-            >
-              Execute
-            </Button>
-          </div>
-        </div>
-
-        <AnimatePresence>
-          {isRunning && (
-            <div className="rounded-md bg-surface-secondary border border-border p-2.5 text-xs">
-              <div className="flex items-center gap-2 text-muted text-xs">
-                <Loader2 className="w-3.5 h-3.5 animate-spin text-foreground" />
-                <span className="font-mono text-[11px] text-foreground">
-                  Running: {selectedTool} {cmdArgs}...
+              <div className="flex h-8 items-center gap-2 border-b border-separator bg-surface-secondary/60 px-4">
+                <span className="text-xs font-medium tracking-wide text-muted uppercase">
+                  {group.label}
+                </span>
+                <span className="tabular-nums text-xs text-muted">
+                  {group.tools.length}
                 </span>
               </div>
+              <div className="divide-y divide-separator">
+                {group.tools.map(renderToolRow)}
+              </div>
             </div>
-          )}
+          ))}
+        </div>
+      ) : (
+        <div className="divide-y divide-separator overflow-hidden rounded-3xl bg-surface shadow-surface">
+          {filteredTools.map(renderToolRow)}
+        </div>
+      )}
 
-          {cmdResult && (
-            <div className="rounded-md bg-surface-secondary border border-border p-3 text-xs space-y-2">
-              <div className="flex items-center justify-between text-muted border-b border-border pb-1.5">
-                <div className="flex items-center gap-2">
-                  <Badge variant={cmdResult.success ? "success" : "danger"} size="xs" dot>
-                    {cmdResult.success ? "Exit Code 0" : `Exit Code ${cmdResult.code}`}
-                  </Badge>
-                  <span className="text-[11px] font-mono text-muted">
-                    {selectedTool} {cmdArgs}
+      {/* Console */}
+      <div id="cli-runner-console" className="scroll-mt-4 pt-3">
+        <div className="overflow-hidden rounded-3xl bg-surface shadow-surface">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-separator px-4 py-2.5">
+            <div>
+              <h3 className="text-sm font-semibold text-foreground">
+                Console
+              </h3>
+              <p className="text-xs text-muted">
+                Run any enabled tool with arguments
+              </p>
+            </div>
+            <div className="hidden items-center gap-0.5 sm:flex" aria-label="Argument presets">
+              {ARG_PRESETS.map((preset) => (
+                <Button
+                  key={preset}
+                  variant={cmdArgs === preset ? "tertiary" : "ghost"}
+                  size="sm"
+                  onClick={() => setCmdArgs(preset)}
+                  className="font-mono"
+                >
+                  {preset}
+                </Button>
+              ))}
+            </div>
+          </div>
+          <div className="grid grid-cols-1 items-end gap-2 p-3 sm:grid-cols-[minmax(0,14rem)_minmax(0,1fr)_auto]">
+            <div className="min-w-0">
+              <Label className="mb-1.5 block text-xs font-medium text-foreground">
+                Tool
+              </Label>
+              <Select
+                variant="secondary"
+                selectedKey={selectedTool}
+                onSelectionChange={(key) =>
+                  setSelectedTool(String(key))
+                }
+                aria-label="Tool"
+              >
+                <Select.Trigger>
+                  <Select.Value />
+                  <Select.Indicator />
+                </Select.Trigger>
+                <Select.Popover>
+                  <ListBox>
+                    {runnableTools.map((t) => (
+                      <ListBox.Item
+                        key={t.id}
+                        id={t.command}
+                        textValue={`${t.command} (${t.name})`}
+                      >
+                        <span className="font-mono">{t.command}</span>
+                        <span className="text-muted"> · {t.name}</span>
+                      </ListBox.Item>
+                    ))}
+                  </ListBox>
+                </Select.Popover>
+              </Select>
+            </div>
+            <div className="min-w-0">
+              <Field label="Arguments">
+                <div className="relative">
+                  <span className="pointer-events-none absolute top-1/2 left-3 z-10 -translate-y-1/2 font-mono text-xs text-muted">
+                    $
+                  </span>
+                  <TextInput
+                    value={cmdArgs}
+                    onChange={(e) => setCmdArgs(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") handleExecute();
+                    }}
+                    placeholder="--version"
+                    aria-label="Arguments"
+                    className="pl-7 font-mono text-sm"
+                  />
+                </div>
+              </Field>
+            </div>
+            <Button
+              variant="primary"
+              isLoading={isRunning}
+              disabled={isRunning || !selectedToolEnabled}
+              icon={<Play />}
+              onClick={handleExecute}
+            >
+              Run
+            </Button>
+          </div>
+
+          <div className="min-h-16 border-t border-separator bg-background-secondary px-4 py-3 font-mono text-xs leading-relaxed">
+            {isRunning ? (
+              <p className="flex items-center gap-2 text-foreground">
+                <Spinner size="sm" color="current" />
+                <span>
+                  $ {selectedTool} {cmdArgs}
+                </span>
+              </p>
+            ) : cmdResult ? (
+              <div className="space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="truncate text-muted">
+                    <span className="text-foreground">
+                      $ {selectedTool} {cmdArgs}
+                    </span>
+                  </p>
+                  <span className="flex shrink-0 items-center gap-1">
+                    <Badge
+                      variant={cmdResult.success ? "success" : "danger"}
+                      dot
+                    >
+                      {cmdResult.success
+                        ? "Exit 0"
+                        : `Exit ${cmdResult.code}`}
+                    </Badge>
+                    <Button
+                      variant="ghost"
+                      iconOnly
+                      icon={copiedOutput ? <Check /> : <Copy />}
+                      onClick={handleCopyOutput}
+                      aria-label={copiedOutput ? "Copied" : "Copy output"}
+                      title="Copy output"
+                    />
+                    <Button
+                      variant="ghost"
+                      onClick={() => setCmdResult(null)}
+                    >
+                      Clear
+                    </Button>
                   </span>
                 </div>
-                <div className="flex items-center gap-1.5">
-                  <Button
-                    variant="ghost"
-                    size="xs"
-                    icon={copiedOutput ? <Check className="w-3 h-3 text-success" /> : <Copy className="w-3 h-3" />}
-                    onClick={handleCopyOutput}
-                  >
-                    {copiedOutput ? "Copied" : "Copy"}
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="xs"
-                    onClick={() => setCmdResult(null)}
-                  >
-                    Clear
-                  </Button>
-                </div>
+                {cmdResult.stdout && (
+                  <pre className=" max-h-48 overflow-y-auto whitespace-pre-wrap text-foreground">
+                    {cmdResult.stdout}
+                  </pre>
+                )}
+                {cmdResult.stderr && (
+                  <pre className=" max-h-48 overflow-y-auto whitespace-pre-wrap text-danger">
+                    {cmdResult.stderr}
+                  </pre>
+                )}
               </div>
-
-              {cmdResult.stdout && (
-                <pre className="text-foreground whitespace-pre-wrap max-h-48 overflow-y-auto font-mono text-[11px] bg-background/50 p-2 rounded border border-border/40">
-                  {cmdResult.stdout}
-                </pre>
-              )}
-
-              {cmdResult.stderr && (
-                <pre className="text-danger whitespace-pre-wrap max-h-48 overflow-y-auto font-mono text-[11px] bg-danger/5 p-2 rounded border border-danger/20">
-                  {cmdResult.stderr}
-                </pre>
-              )}
-            </div>
-          )}
-        </AnimatePresence>
+            ) : (
+              <p className="text-muted">
+                $ <span className="opacity-60">▍</span>
+                <span className="sr-only">
+                  No command run yet. Pick a binary above and press Run.
+                </span>
+              </p>
+            )}
+          </div>
+        </div>
       </div>
 
-      {/* Register Custom CLI Modal Dialog */}
+      {/* Register custom CLI */}
       <Modal
         isOpen={showAddModal}
         onClose={() => setShowAddModal(false)}
-        title="Register Custom CLI Binary"
-        description="Add any local AI agent executable, Python runner, or custom binary to the TUARI V2 orchestration pipeline."
+        size="sm"
+        icon={<Plus className="size-4" />}
+        title="Register custom binary"
+        description="Add any local agent executable or runner to the pipeline."
         footer={
           <>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setShowAddModal(false)}
-            >
+            <Button variant="ghost" onClick={() => setShowAddModal(false)}>
               Cancel
             </Button>
             <Button
               variant="primary"
-              size="sm"
               isLoading={isAdding}
               disabled={isAdding || !customName || !customPath}
               onClick={handleAddCustom}
             >
-              Register & Probe Binary
+              Register & probe
             </Button>
           </>
         }
       >
-        <form onSubmit={handleAddCustom} className="space-y-3.5">
-          <div>
-            <label className="block text-xs font-medium text-foreground mb-1">
-              Tool Label / Name
-            </label>
-            <input
-              type="text"
-              placeholder="e.g. My Custom Agent CLI"
+        <form onSubmit={handleAddCustom} className="space-y-4">
+          <Field label="Tool name">
+            <TextInput
+              placeholder="e.g. My Custom Agent"
               value={customName}
               onChange={(e) => setCustomName(e.target.value)}
-              className="w-full px-3 py-2 rounded-md text-xs bg-field border border-border text-foreground placeholder:text-muted focus:outline-none focus:border-foreground"
               required
+              aria-label="Tool name"
             />
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-foreground mb-1">
-              Executable Command or Absolute Binary Path
-            </label>
-            <input
-              type="text"
+          </Field>
+          <Field
+            label="Command or absolute path"
+            hint="A PATH command or a full path to the executable"
+          >
+            <TextInput
               placeholder="e.g. my-cli or C:\tools\my-cli.exe"
               value={customPath}
               onChange={(e) => setCustomPath(e.target.value)}
-              className="w-full px-3 py-2 rounded-md text-xs bg-field border border-border text-foreground placeholder:text-muted focus:outline-none focus:border-foreground font-mono"
               required
+              aria-label="Command or absolute path"
+              className="font-mono"
             />
-          </div>
+          </Field>
         </form>
       </Modal>
     </div>

@@ -1,0 +1,11 @@
+faster-whisper==1.2.1
+# faster-whisper 1.2.1 still passes metadata_errors to av.open; PyAV 17+
+# removed that argument. Keep a verified decoder instead of silently
+# producing caption-free placeholder transcripts after an upgrade.
+av>=14,<17
+huggingface-hub>=0.21,<1
+# Patched transitive versions; these require a supported Python runtime.
+anyio>=4.14.2
+filelock>=3.20.3
+fsspec>=2026.6.0
+-r requirements-framing.txt

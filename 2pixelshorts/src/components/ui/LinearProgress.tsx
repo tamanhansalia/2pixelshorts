@@ -2,22 +2,30 @@ import React from "react";
 import { ProgressBar } from "@heroui/react";
 
 interface LinearProgressProps {
-  progress?: number; // 0 to 100
+  /** 0–100. Omit for indeterminate. */
+  progress?: number;
+  label?: string;
   className?: string;
 }
 
-export const LinearProgress: React.FC<LinearProgressProps> = ({ progress, className = "" }) => {
+export const LinearProgress: React.FC<LinearProgressProps> = ({
+  progress,
+  label = "Progress",
+  className,
+}) => {
   const isIndeterminate = typeof progress !== "number";
-
   return (
     <ProgressBar
-      aria-label="Task Progress"
-      value={!isIndeterminate ? Math.min(100, Math.max(0, progress)) : undefined}
+      aria-label={label}
+      value={isIndeterminate ? undefined : Math.min(100, Math.max(0, progress))}
+      maxValue={100}
       isIndeterminate={isIndeterminate}
-      className={`w-full ${className}`}
+      color="accent"
+      size="sm"
+      className={className}
     >
-      <ProgressBar.Track className="h-1 bg-surface-tertiary rounded-full overflow-hidden relative">
-        <ProgressBar.Fill className="h-full bg-foreground rounded-full transition-all duration-300 ease-out" />
+      <ProgressBar.Track>
+        <ProgressBar.Fill />
       </ProgressBar.Track>
     </ProgressBar>
   );

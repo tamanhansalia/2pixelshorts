@@ -88,14 +88,6 @@ pub const KNOWN_TOOLS: &[CliDefinition] = &[
         description: "xAI Grok terminal CLI for reasoning, scripting, and content generation.",
         category: "agent",
     },
-    CliDefinition {
-        id: "gemini",
-        name: "Gemini CLI",
-        binary: "gemini",
-        version_flag: "--version",
-        description: "Google Gemini CLI for multimodality, fast scripting, and code workflows.",
-        category: "agent",
-    },
 ];
 
 /// Resolve the absolute path of an executable on the host OS
@@ -105,7 +97,7 @@ pub async fn resolve_binary_path(binary: &str) -> Option<String> {
     #[cfg(not(target_os = "windows"))]
     let which_cmd = "which";
 
-    match timeout(Duration::from_secs(3), Command::new(which_cmd).arg(binary).output()).await {
+    match timeout(Duration::from_secs(3), Command::new(which_cmd).kill_on_drop(true).arg(binary).output()).await {
         Ok(Ok(output)) if output.status.success() => {
             let out_str = String::from_utf8_lossy(&output.stdout);
             let first_line = out_str.lines().next().map(|s| s.trim().to_string());
@@ -121,11 +113,13 @@ fn build_command(executable: &str, arg: &str) -> Command {
     {
         if executable.ends_with(".cmd") || executable.ends_with(".bat") {
             let mut cmd = Command::new("cmd.exe");
+            cmd.kill_on_drop(true);
             cmd.args(["/C", executable, arg]);
             return cmd;
         }
     }
     let mut cmd = Command::new(executable);
+    cmd.kill_on_drop(true);
     cmd.arg(arg);
     cmd
 }
@@ -167,12 +161,25 @@ pub async fn scan_all_clis() -> Vec<CliToolInfo> {
     let mut results = Vec::new();
 
     for def in KNOWN_TOOLS {
-        let (is_available, path, version) = probe_cli(def.binary, def.version_flag).await;
+        let (mut is_available, mut path, mut version) =
+            probe_cli(def.binary, def.version_flag).await;
+        let mut command = def.binary.to_string();
+
+        // macOS/Linux ship the interpreter as `python3`; Windows uses `python`.
+        if def.id == "python" && !is_available {
+            let fallback = probe_cli("python3", def.version_flag).await;
+            if fallback.0 {
+                is_available = fallback.0;
+                path = fallback.1;
+                version = fallback.2;
+                command = "python3".to_string();
+            }
+        }
 
         results.push(CliToolInfo {
             id: def.id.to_string(),
             name: def.name.to_string(),
-            command: def.binary.to_string(),
+            command,
             path,
             version,
             is_available,

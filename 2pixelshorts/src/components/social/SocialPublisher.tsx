@@ -1,60 +1,86 @@
 import React, { useState, useEffect } from "react";
-import { motion, AnimatePresence } from "framer-motion";
-import { 
-  Share2, 
-  Send, 
-  Clock, 
-  Key, 
-  Check, 
-  ExternalLink, 
-  Copy, 
-  AlertCircle, 
-  RefreshCw, 
-  Loader2,
-  Film,
-  Sparkles,
+import {
+  AlertCircle,
+  Check,
   ChevronDown,
-  ChevronUp
+  Clock,
+  Copy,
+  ExternalLink,
+  Film,
+  Key,
+  RefreshCw,
+  Send,
+  Share2,
+  Trash2,
+  X,
 } from "lucide-react";
-import { SocialPublishPayload, ZernioAccount } from "../../types";
+import { Alert, ListBox, Select, Spinner } from "@heroui/react";
+import { ScheduleItem, SocialPublishPayload, ZernioAccount } from "../../types";
+import {
+  DEFAULT_TIMEZONE,
+  formatScheduledLabel,
+  splitSchedule,
+  type SelectableShort,
+} from "../../lib/outbox";
+import {
+  accountLabel,
+  canDispatch,
+  canonicalPlatformId,
+  connectedPlatformIds,
+  isPlatformConnected,
+} from "../../lib/channels";
+import { openExternalUrl } from "../../lib/ipc";
+import { notify } from "../../lib/notify";
 import { LinearProgress } from "../ui/LinearProgress";
 import { Button } from "../ui/Button";
+import { PageHeader } from "../layout/PageHeader";
 import { Badge } from "../ui/Badge";
+import { SectionCard } from "../ui/Card";
+import { EmptyState } from "../ui/EmptyState";
+import { Modal } from "../ui/Modal";
+import { Field, TextInput } from "../ui/Field";
+import { Segmented } from "../ui/Segmented";
 
 const YoutubeIcon = () => (
-  <svg className="w-3.5 h-3.5 fill-current" viewBox="0 0 24 24">
-    <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/>
+  <svg className="size-4 fill-current" viewBox="0 0 24 24">
+    <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z" />
   </svg>
 );
 
 const TwitterIcon = () => (
-  <svg className="w-3.5 h-3.5 fill-current" viewBox="0 0 24 24">
-    <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
+  <svg className="size-4 fill-current" viewBox="0 0 24 24">
+    <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
   </svg>
 );
 
 const InstagramIcon = () => (
-  <svg className="w-3.5 h-3.5 fill-none stroke-current stroke-2" viewBox="0 0 24 24">
-    <rect width="20" height="20" x="2" y="2" rx="5" ry="5"/>
-    <path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z"/>
-    <line x1="17.5" x2="17.51" y1="6.5" y2="6.5"/>
+  <svg
+    className="size-4 fill-none stroke-current stroke-2"
+    viewBox="0 0 24 24"
+  >
+    <rect width="20" height="20" x="2" y="2" rx="5" ry="5" />
+    <path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z" />
+    <line x1="17.5" x2="17.51" y1="6.5" y2="6.5" />
   </svg>
 );
 
 const LinkedinIcon = () => (
-  <svg className="w-3.5 h-3.5 fill-current" viewBox="0 0 24 24">
-    <path d="M19 0h-14c-2.761 0-5 2.239-5 5v14c0 2.761 2.239 5 5 5h14c2.762 0 5-2.239 5-5v-14c0-2.761-2.238-5-5-5zm-11 19h-3v-11h3v11zm-1.5-12.268c-.966 0-1.75-.79-1.75-1.764s.784-1.764 1.75-1.764 1.75.79 1.75 1.764-.783 1.764-1.75 1.764zm13.5 12.268h-3v-5.604c0-3.368-4-3.113-4 0v5.604h-3v-11h3v1.765c1.396-2.586 7-2.777 7 2.476v6.759z"/>
+  <svg className="size-4 fill-current" viewBox="0 0 24 24">
+    <path d="M19 0h-14c-2.761 0-5 2.239-5 5v14c0 2.761 2.239 5 5 5h14c2.762 0 5-2.239 5-5v-14c0-2.761-2.238-5-5-5zm-11 19h-3v-11h3v11zm-1.5-12.268c-.966 0-1.75-.79-1.75-1.764s.784-1.764 1.75-1.764 1.75.79 1.75 1.764-.783 1.764-1.75 1.764zm13.5 12.268h-3v-5.604c0-3.368-4-3.113-4 0v5.604h-3v-11h3v1.765c1.396-2.586 7-2.777 7 2.476v6.759z" />
   </svg>
 );
 
 const FacebookIcon = () => (
-  <svg className="w-3.5 h-3.5 fill-current" viewBox="0 0 24 24">
-    <path d="M9 8H6v4h3v12h5V12h3.642L18 8h-4V6.333C14 5.374 14.5 5 15.5 5H18V0h-3.8c-3.6 0-5.2 1.8-5.2 4.8V8z"/>
+  <svg className="size-4 fill-current" viewBox="0 0 24 24">
+    <path d="M9 8H6v4h3v12h5V12h3.642L18 8h-4V6.333C14 5.374 14.5 5 15.5 5H18V0h-3.8c-3.6 0-5.2 1.8-5.2 4.8V8z" />
   </svg>
 );
 
-const PLATFORMS = [
-  { id: "tiktok", name: "TikTok", icon: Share2 },
+const TiktokIcon = () => <Share2 className="size-4" />;
+
+/** Channel set shared with the Queue edit modal — single source of truth. */
+export const PLATFORMS = [
+  { id: "tiktok", name: "TikTok", icon: TiktokIcon },
   { id: "youtube", name: "YouTube Shorts", icon: YoutubeIcon },
   { id: "instagram", name: "Instagram Reels", icon: InstagramIcon },
   { id: "twitter", name: "X / Twitter", icon: TwitterIcon },
@@ -62,41 +88,255 @@ const PLATFORMS = [
   { id: "facebook", name: "Facebook", icon: FacebookIcon },
 ];
 
+export const TIMEZONES = [
+  { id: "Asia/Kolkata", label: "Asia/Kolkata (IST)" },
+  { id: "America/New_York", label: "America/New_York (EST)" },
+  { id: "America/Los_Angeles", label: "America/Los_Angeles (PST)" },
+  { id: "Europe/London", label: "Europe/London (GMT)" },
+  { id: "UTC", label: "UTC" },
+];
+
 interface SocialPublisherProps {
   apiKey: string;
-  onSaveApiKey: (key: string) => void;
+  onSaveApiKey: (key: string) => Promise<void>;
   onPublish: (apiKey: string, payload: SocialPublishPayload) => Promise<string>;
+  onQueueShort: (payload: SocialPublishPayload) => ScheduleItem;
   onGetAccounts?: (apiKey: string) => Promise<ZernioAccount[]>;
   onConnectPlatform?: (apiKey: string, platform: string) => Promise<void>;
   initialVideoPath?: string;
   initialTitle?: string;
   initialDescription?: string;
   initialTags?: string[];
+  /** Queue "Open in Social" carries the entry's schedule + channels so
+   * nothing is dropped when a queued post is finished here. */
+  initialPlatforms?: string[];
+  initialScheduledFor?: string;
+  initialTimezone?: string;
+  /** Finished renders and queued posts the user can load from this page. */
+  availableShorts?: SelectableShort[];
+  onSelectShort?: (short: SelectableShort) => void;
+  /** Dismiss a rendered (not queued) short from history (file kept). */
+  onDismissShortOutput?: (outputPath: string) => void;
+  /** Delete a queued post from the schedule (confirm first, in-chooser). */
+  onDeleteQueuedShort?: (queueId: string) => void;
+  onClearShort?: () => void;
+  onOpenStudio?: () => void;
+  onOpenQueue?: () => void;
+}
+
+function fileNameOf(path: string): string {
+  return path.split(/[\\/]/).pop() || path;
+}
+
+/** Body of the Post panel when nothing is loaded: pick a short or go make one. */
+function ShortChooser({
+  shorts,
+  onSelect,
+  onDismissOutput,
+  onDeleteQueued,
+  onOpenStudio,
+  onOpenQueue,
+}: {
+  shorts: SelectableShort[];
+  onSelect?: (short: SelectableShort) => void;
+  /** Instant dismiss for rendered rows (history only, file kept). */
+  onDismissOutput?: (outputPath: string) => void;
+  /** Confirmed delete for queued rows (removes the scheduled post). */
+  onDeleteQueued?: (queueId: string) => void;
+  onOpenStudio?: () => void;
+  onOpenQueue?: () => void;
+}) {
+  // Queued rows delete the scheduled post, so they confirm first — same
+  // pattern as the Queue page. Rendered rows dismiss instantly (file kept),
+  // matching the Jobs drawer and the Ready-to-queue list.
+  const [shortToDelete, setShortToDelete] =
+    useState<SelectableShort | null>(null);
+  if (shorts.length === 0) {
+    return (
+      <EmptyState
+        icon={<Film />}
+        title="No short to publish"
+        description="Render a short in Studio, or add a finished file from Queue. It shows up here so you can pick channels and send it."
+        action={
+          <div className="flex flex-wrap items-center justify-center gap-2">
+            {onOpenStudio && (
+              <Button variant="primary" onClick={onOpenStudio}>
+                Open Studio
+              </Button>
+            )}
+            {onOpenQueue && (
+              <Button variant="secondary" onClick={onOpenQueue}>
+                Open Queue
+              </Button>
+            )}
+          </div>
+        }
+      />
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      <p className="text-xs text-muted">
+        Choose a short to publish now or schedule.
+      </p>
+      <ul className="divide-y divide-separator overflow-hidden rounded-md border border-border">
+        {shorts.map((short) => {
+          const name = fileNameOf(short.videoPath);
+          const isQueued = short.source === "queue";
+          const canDismiss = isQueued ? !!onDeleteQueued : !!onDismissOutput;
+          return (
+            <li
+              key={`${short.source}:${short.id}`}
+              className="flex items-center gap-1 px-3 py-2.5 transition-colors hover:bg-surface-secondary"
+            >
+              <button
+                type="button"
+                onClick={() => onSelect?.(short)}
+                className="flex min-w-0 flex-1 items-center gap-3 text-left"
+                aria-label={`Load ${short.title} for posting`}
+              >
+                <span className="flex h-9 w-[20px] shrink-0 items-center justify-center rounded-[3px] border border-border bg-surface-tertiary text-muted">
+                  <Film className="size-3" />
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm font-medium text-foreground">
+                    {short.title}
+                  </span>
+                  <span
+                    className="block truncate font-mono text-xs text-muted"
+                    title={short.videoPath}
+                  >
+                    {name}
+                  </span>
+                </span>
+                <Badge variant={isQueued ? "warning" : "success"}>
+                  {isQueued ? "In queue" : "Rendered"}
+                </Badge>
+              </button>
+              {canDismiss && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  iconOnly
+                  icon={<X />}
+                  onClick={() =>
+                    isQueued
+                      ? setShortToDelete(short)
+                      : onDismissOutput?.(short.videoPath)
+                  }
+                  aria-label={
+                    isQueued ? `Delete queued ${name}` : `Dismiss ${name}`
+                  }
+                  title={
+                    isQueued
+                      ? "Delete queued post"
+                      : "Dismiss from history (file stays on disk)"
+                  }
+                  className={`size-7 shrink-0 text-muted hover:text-foreground ${isQueued ? "hover:text-danger" : ""}`}
+                />
+              )}
+            </li>
+          );
+        })}
+      </ul>
+
+      <Modal
+        isOpen={!!shortToDelete}
+        onClose={() => setShortToDelete(null)}
+        size="sm"
+        icon={<Trash2 className="size-4" />}
+        title="Delete queued post"
+        description="This permanently removes the post from the schedule queue. The video file stays on disk."
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setShortToDelete(null)}>
+              Keep in queue
+            </Button>
+            <Button
+              variant="danger"
+              onClick={() => {
+                if (shortToDelete && onDeleteQueued) {
+                  onDeleteQueued(shortToDelete.id);
+                }
+                setShortToDelete(null);
+              }}
+            >
+              Delete
+            </Button>
+          </>
+        }
+      >
+        {shortToDelete && (
+          <div className="space-y-1 rounded-md border border-border bg-surface-secondary p-3">
+            <div className="text-sm font-semibold text-foreground">
+              {shortToDelete.title}
+            </div>
+            <div className="truncate font-mono text-xs text-muted">
+              {fileNameOf(shortToDelete.videoPath)}
+            </div>
+          </div>
+        )}
+      </Modal>
+    </div>
+  );
 }
 
 export const SocialPublisher: React.FC<SocialPublisherProps> = ({
   apiKey,
   onSaveApiKey,
   onPublish,
+  onQueueShort,
   onGetAccounts,
   onConnectPlatform,
-  initialVideoPath = "final_short.mp4",
+  initialVideoPath = "",
   initialTitle,
   initialDescription,
-  initialTags: _initialTags,
+  initialTags,
+  initialPlatforms,
+  initialScheduledFor,
+  initialTimezone,
+  availableShorts = [],
+  onSelectShort,
+  onDismissShortOutput,
+  onDeleteQueuedShort,
+  onClearShort,
+  onOpenStudio,
+  onOpenQueue,
 }) => {
-  const [selectedPlatforms, setSelectedPlatforms] = useState<string[]>(["tiktok", "youtube"]);
-  const [title, setTitle] = useState(initialTitle || "AI-Automated Short #coding #tech #viral");
-  const [description, setDescription] = useState(initialDescription || "Processed with TUARI V2 local AI video pipeline.");
-  const [videoPath, setVideoPath] = useState(initialVideoPath);
-  const [publishNow, setPublishNow] = useState(true);
-  const [scheduledDate, setScheduledDate] = useState("");
-  const [scheduledTime, setScheduledTime] = useState("18:00");
-  const [timezone, setTimezone] = useState("Asia/Kolkata");
+  const [apiKeyDraft, setApiKeyDraft] = useState(apiKey);
+  const [savingKey, setSavingKey] = useState(false);
+  useEffect(() => setApiKeyDraft(apiKey), [apiKey]);
+  // Nothing is pre-selected except a Queue "Open in Social" carry-over:
+  // selection otherwise only ever comes from linked accounts.
+  const [selectedPlatforms, setSelectedPlatforms] = useState<string[]>(
+    initialPlatforms ? [...initialPlatforms] : [],
+  );
+  // Studio and Queue own the short's metadata; Social only distributes it.
+  const title = initialTitle ?? "";
+  const description = initialDescription ?? "";
+  const videoPath = initialVideoPath;
+  const tags = initialTags ?? [];
+  const hasShort = Boolean(videoPath.trim() && title.trim());
+  const shortHint = "Choose a short on this page, send one from Studio, or open one from Queue.";
+  // A carried-over queue schedule starts in Schedule mode with its slot
+  // prefilled; everything else starts as publish-now.
+  const [publishNow, setPublishNow] = useState(!initialScheduledFor);
+  const [scheduledDate, setScheduledDate] = useState(
+    () => splitSchedule(initialScheduledFor).date,
+  );
+  const [scheduledTime, setScheduledTime] = useState(
+    () => splitSchedule(initialScheduledFor).time,
+  );
+  const [timezone, setTimezone] = useState(
+    initialTimezone ?? DEFAULT_TIMEZONE,
+  );
 
   const [accounts, setAccounts] = useState<ZernioAccount[]>([]);
   const [isLoadingAccounts, setIsLoadingAccounts] = useState(false);
-  const [connectingPlatform, setConnectingPlatform] = useState<string | null>(null);
+  const [connectingPlatform, setConnectingPlatform] = useState<string | null>(
+    null,
+  );
   const [showApiKeyInput, setShowApiKeyInput] = useState(false);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -105,29 +345,30 @@ export const SocialPublisher: React.FC<SocialPublisherProps> = ({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [copiedResponse, setCopiedResponse] = useState(false);
 
-  useEffect(() => {
-    if (initialVideoPath) {
-      setVideoPath(initialVideoPath);
-    }
-  }, [initialVideoPath]);
-
-  useEffect(() => {
-    if (initialTitle) {
-      setTitle(initialTitle);
-    }
-  }, [initialTitle]);
-
-  useEffect(() => {
-    if (initialDescription) {
-      setDescription(initialDescription);
-    }
-  }, [initialDescription]);
+  const connectedIds = connectedPlatformIds(accounts);
 
   useEffect(() => {
     if (apiKey.trim()) {
       loadAccounts();
+    } else {
+      // Key removed: drop everything so no stale links stay visible.
+      setAccounts([]);
+      setSelectedPlatforms([]);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiKey]);
+
+  const handleOpenPortal = async () => {
+    try {
+      await openExternalUrl("https://zernio.com/app/accounts");
+    } catch (err: unknown) {
+      notify(
+        "Couldn't open browser",
+        err instanceof Error ? err.message : "https://zernio.com/app/accounts",
+        "error",
+      );
+    }
+  };
 
   const loadAccounts = async () => {
     if (!onGetAccounts || !apiKey.trim()) return;
@@ -135,14 +376,18 @@ export const SocialPublisher: React.FC<SocialPublisherProps> = ({
     try {
       const list = await onGetAccounts(apiKey.trim());
       setAccounts(list);
-      const connectedPlatforms = list
-        .filter((a) => a.is_connected)
-        .map((a) => a.platform.toLowerCase());
-      if (connectedPlatforms.length > 0) {
-        setSelectedPlatforms(connectedPlatforms);
-      }
+      setErrorMessage(null);
+      const connected = connectedPlatformIds(list);
+      setSelectedPlatforms((prev) =>
+        prev.length === 0
+          ? connected
+          : prev.filter((p) => connected.includes(p.toLowerCase())),
+      );
     } catch (e) {
       console.error("Failed to load accounts:", e);
+      setErrorMessage(
+        `Couldn't sync accounts: ${e instanceof Error ? e.message : "gateway request failed"} — check the API key and try again.`,
+      );
     } finally {
       setIsLoadingAccounts(false);
     }
@@ -159,17 +404,18 @@ export const SocialPublisher: React.FC<SocialPublisherProps> = ({
   };
 
   const togglePlatform = (id: string) => {
+    if (!connectedIds.includes(id.toLowerCase())) return;
     setSelectedPlatforms((prev) =>
-      prev.includes(id) ? prev.filter((p) => p !== id) : [...prev, id]
+      prev.includes(id) ? prev.filter((p) => p !== id) : [...prev, id],
     );
   };
 
   const handleSelectAll = () => {
-    if (selectedPlatforms.length === PLATFORMS.length) {
-      setSelectedPlatforms([]);
-    } else {
-      setSelectedPlatforms(PLATFORMS.map((p) => p.id));
-    }
+    setSelectedPlatforms((prev) =>
+      prev.length === connectedIds.length && connectedIds.length > 0
+        ? []
+        : [...connectedIds],
+    );
   };
 
   const handleCopyResponse = () => {
@@ -179,8 +425,89 @@ export const SocialPublisher: React.FC<SocialPublisherProps> = ({
     setTimeout(() => setCopiedResponse(false), 2000);
   };
 
+  // Schedule mode queues locally: no key or linked channels required.
+  // Channels can be picked now (when linked) or later via Queue → Edit.
+  const canQueueLocal =
+    hasShort &&
+    scheduledDate.trim().length > 0 &&
+    (connectedIds.length === 0 || selectedPlatforms.length > 0);
+
+  const queueHint = !hasShort
+    ? shortHint
+    : !scheduledDate
+      ? "Pick a release date first"
+      : connectedIds.length > 0 && selectedPlatforms.length === 0
+        ? "Select at least one channel"
+        : undefined;
+
   const handlePublish = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    if (!hasShort) {
+      setErrorMessage(shortHint);
+      return;
+    }
+
+    // Every selected platform needs a linked account id — never send the
+    // platform slug itself (the gateway rejects it with a 400).
+    const unlinked = selectedPlatforms.filter(
+      (p) =>
+        !accounts.some(
+          (a) =>
+            a.is_connected &&
+            canonicalPlatformId(a.platform) === canonicalPlatformId(p),
+        ),
+    );
+    if (unlinked.length > 0) {
+      setErrorMessage(
+        `No linked account for ${unlinked.join(", ")} — sync accounts and try again.`,
+      );
+      setSelectedPlatforms((prev) =>
+        prev.filter(
+          (p) =>
+            !unlinked.some((u) => u.toLowerCase() === p.toLowerCase()),
+        ),
+      );
+      return;
+    }
+    const targetAccountIds = selectedPlatforms.map((p) => {
+      const acc = accounts.find(
+        (a) =>
+          a.is_connected &&
+          canonicalPlatformId(a.platform) === canonicalPlatformId(p),
+      );
+      return acc ? acc.id : p;
+    });
+
+    const payload: SocialPublishPayload = {
+      title,
+      description,
+      platforms: selectedPlatforms,
+      video_path: videoPath,
+      publish_now: publishNow,
+      scheduled_for:
+        !publishNow && scheduledDate
+          ? `${scheduledDate}T${scheduledTime}:00`
+          : undefined,
+      timezone,
+      account_ids: targetAccountIds,
+      tags,
+    };
+
+    // Schedule → local queue entry, always visible on the Queue page.
+    if (!publishNow) {
+      if (!canQueueLocal) {
+        setErrorMessage(queueHint ?? "Complete the schedule form first.");
+        return;
+      }
+      const entry = onQueueShort(payload);
+      setErrorMessage(null);
+      setResponseMessage(
+        `Queued "${entry.title}" for ${formatScheduledLabel(entry.scheduled_for)} — post it anytime from the Queue page.`,
+      );
+      return;
+    }
+
     if (selectedPlatforms.length === 0) {
       setErrorMessage("Please select at least one social media channel.");
       return;
@@ -190,6 +517,18 @@ export const SocialPublisher: React.FC<SocialPublisherProps> = ({
       setShowApiKeyInput(true);
       return;
     }
+    const stale = selectedPlatforms.filter(
+      (p) => !connectedIds.includes(p.toLowerCase()),
+    );
+    if (stale.length > 0) {
+      setErrorMessage(
+        "Selected channels are no longer connected. Sync accounts and try again.",
+      );
+      setSelectedPlatforms((prev) =>
+        prev.filter((p) => connectedIds.includes(p.toLowerCase())),
+      );
+      return;
+    }
 
     setIsSubmitting(true);
     setSubmitStage("Preparing media payload...");
@@ -197,412 +536,428 @@ export const SocialPublisher: React.FC<SocialPublisherProps> = ({
     setResponseMessage(null);
 
     try {
-      const scheduled_for = !publishNow && scheduledDate
-        ? `${scheduledDate}T${scheduledTime}:00`
-        : undefined;
-
-      const targetAccountIds = selectedPlatforms.map((p) => {
-        const acc = accounts.find((a) => a.platform.toLowerCase() === p);
-        return acc ? acc.id : p;
-      });
-
-      const payload: SocialPublishPayload = {
-        title,
-        description,
-        platforms: selectedPlatforms,
-        video_path: videoPath,
-        publish_now: publishNow,
-        scheduled_for,
-        timezone,
-        account_ids: targetAccountIds,
-      };
-
       setSubmitStage("Connecting to Zernio REST Gateway...");
       await new Promise((r) => setTimeout(r, 250));
 
       setSubmitStage(`Dispatching to ${selectedPlatforms.join(", ")}...`);
       const result = await onPublish(apiKey, payload);
       setResponseMessage(result);
-    } catch (err: any) {
-      setErrorMessage(err?.toString() || "Publishing failed");
+    } catch (err: unknown) {
+      setErrorMessage(err instanceof Error ? err.message : "Publishing failed");
     } finally {
       setIsSubmitting(false);
     }
   };
 
   const connectedCount = accounts.filter((a) => a.is_connected).length;
+  const videoName = videoPath.split(/[\\/]/).pop() || videoPath;
+  const submitDisabled =
+    isSubmitting ||
+    !hasShort ||
+    (publishNow
+      ? !canDispatch(apiKey, selectedPlatforms, accounts)
+      : !canQueueLocal);
+  const submitHint = !hasShort
+    ? shortHint
+    : publishNow
+      ? !apiKey.trim()
+        ? "Add your Zernio API key to publish"
+        : selectedPlatforms.length === 0
+          ? "Link and select at least one channel"
+          : `Publishing to ${selectedPlatforms.length} channel${selectedPlatforms.length === 1 ? "" : "s"}`
+      : (queueHint ?? "Adds the post to the Queue page");
 
   return (
-    <div className="space-y-4 max-w-6xl mx-auto select-none font-sans">
-      {/* Top Header Action Bar */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3 rounded-lg bg-surface border border-border">
-        <div className="flex items-center gap-2.5">
-          <div className="h-6 w-6 rounded bg-surface-secondary border border-border flex items-center justify-center text-foreground shrink-0">
-            <Share2 className="w-3.5 h-3.5" />
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="text-xs font-semibold text-foreground tracking-tight">
-              Social Dispatch
-            </span>
-            <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-surface-secondary text-muted border border-border">
-              {connectedCount}/{PLATFORMS.length} channels
-            </span>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-2 self-end sm:self-auto">
-          <button
-            type="button"
-            onClick={() => setShowApiKeyInput(!showApiKeyInput)}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded text-xs border border-border bg-surface-secondary hover:bg-surface-tertiary text-foreground transition cursor-pointer"
-          >
-            <Key className="w-3 h-3 text-muted" />
-            <span className="text-[11px] font-medium">
-              {apiKey.trim() ? "API Key Configured" : "Enter API Key"}
-            </span>
-            {showApiKeyInput ? <ChevronUp className="w-3 h-3 text-muted" /> : <ChevronDown className="w-3 h-3 text-muted" />}
-          </button>
-
+    <div className="space-y-6">
+      <PageHeader
+        title="Social"
+        description={
+          <>
+            <span className="font-medium text-foreground">{connectedCount}</span>{" "}
+            of {PLATFORMS.length} channels connected
+            {apiKey.trim() ? "" : " · API key required"}
+          </>
+        }
+        actions={
+          <>
           <Button
             variant="secondary"
-            size="xs"
-            icon={<RefreshCw className={`w-3 h-3 ${isLoadingAccounts ? "animate-spin" : ""}`} />}
-            onClick={loadAccounts}
+            icon={<Key />}
+            onClick={() => setShowApiKeyInput(!showApiKeyInput)}
+            aria-expanded={showApiKeyInput}
+          >
+            {apiKey.trim() ? "API key" : "Add API key"}
+            <ChevronDown
+              className={`size-3.5 text-muted transition-transform ${showApiKeyInput ? "rotate-180" : ""}`}
+            />
+          </Button>
+          <Button
+            variant="secondary"
             isLoading={isLoadingAccounts}
+            icon={<RefreshCw />}
+            onClick={loadAccounts}
             disabled={!apiKey.trim()}
           >
             Sync
           </Button>
-
           <Button
             variant="ghost"
-            size="xs"
-            icon={<ExternalLink className="w-3 h-3" />}
-            iconPlacement="end"
-            onClick={() => window.open("https://zernio.com/app/accounts", "_blank")}
+            icon={<ExternalLink />}
+            onClick={handleOpenPortal}
           >
-            Portal
+            Zernio
           </Button>
-        </div>
-      </div>
+          </>
+        }
+      />
 
-      {/* Expandable API Key drawer */}
-      <AnimatePresence>
-        {showApiKeyInput && (
-          <motion.div
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: "auto" }}
-            exit={{ opacity: 0, height: 0 }}
-            className="p-3.5 rounded-lg bg-surface border border-border flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
-          >
-            <div className="flex items-center gap-2">
-              <Key className="w-3.5 h-3.5 text-muted" />
-              <span className="text-muted font-medium">Zernio REST Gateway Token:</span>
+      {/* API key panel */}
+      {showApiKeyInput && (
+        <div className="flex flex-col gap-2 rounded-3xl bg-surface shadow-surface p-4 sm:flex-row sm:items-center">
+          <div className="min-w-0 sm:w-56">
+            <div className="text-sm font-medium text-foreground">
+              Zernio API key
             </div>
-            <div className="flex items-center gap-2 flex-1 max-w-md">
-              <input
-                type="password"
-                placeholder="zr_live_..."
-                value={apiKey}
-                onChange={(e) => onSaveApiKey(e.target.value)}
-                className="w-full px-3 py-1.5 rounded-md bg-field border border-border text-xs text-foreground placeholder:text-muted focus:outline-none focus:border-foreground font-mono transition"
-              />
-              {apiKey.trim() ? (
-                <Badge variant="success" size="xs" dot>Active</Badge>
-              ) : (
-                <Badge variant="default" size="xs">Required</Badge>
-              )}
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* 2-Column Desktop Workstation */}
-      <form onSubmit={handlePublish} className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-        {/* Left Column: Channels Matrix (5 cols) */}
-        <div className="lg:col-span-5 space-y-3">
-          <div className="p-3.5 rounded-lg bg-surface border border-border space-y-3">
-            <div className="flex items-center justify-between">
-              <div>
-                <span className="text-xs font-semibold text-foreground tracking-tight">
-                  Target Channels
-                </span>
-                <span className="text-[11px] text-muted block">
-                  {selectedPlatforms.length} selected
-                </span>
-              </div>
-              <button
-                type="button"
-                onClick={handleSelectAll}
-                className="text-[11px] text-muted hover:text-foreground transition cursor-pointer"
-              >
-                {selectedPlatforms.length === PLATFORMS.length ? "Deselect All" : "Select All"}
-              </button>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 gap-2">
-              {PLATFORMS.map((platform) => {
-                const Icon = platform.icon;
-                const isSelected = selectedPlatforms.includes(platform.id);
-                const acc = accounts.find((a) => a.platform.toLowerCase() === platform.id);
-                const isConnected = acc?.is_connected ?? (platform.id === "tiktok" || platform.id === "youtube");
-                const isConnecting = connectingPlatform === platform.id;
-
-                return (
-                  <div
-                    key={platform.id}
-                    onClick={() => togglePlatform(platform.id)}
-                    className={`p-3 rounded-md border flex items-center justify-between gap-3 cursor-pointer transition-all ${
-                      isSelected
-                        ? "bg-surface-secondary border-foreground/80 shadow-xs"
-                        : "bg-surface-secondary/40 border-border hover:border-muted/80"
-                    }`}
-                  >
-                    <div className="flex items-center gap-2.5 min-w-0">
-                      <div className={`p-1.5 rounded ${isSelected ? "bg-foreground text-background" : "bg-surface border border-border text-foreground"}`}>
-                        <Icon />
-                      </div>
-                      <div className="min-w-0">
-                        <div className="text-xs font-semibold text-foreground truncate">
-                          {platform.name}
-                        </div>
-                        <div className="text-[10px] text-muted font-mono truncate">
-                          {acc?.username || (isConnected ? "@TUARIStudio" : "Unlinked")}
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-2 shrink-0">
-                      {isConnected ? (
-                        <div className={`h-4 w-4 rounded flex items-center justify-center border transition-colors ${
-                          isSelected ? "bg-foreground text-background border-foreground" : "border-border bg-surface"
-                        }`}>
-                          {isSelected && <Check className="w-3 h-3 stroke-[3]" />}
-                        </div>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleConnect(platform.id);
-                          }}
-                          className="text-[10px] text-muted hover:text-foreground underline cursor-pointer"
-                        >
-                          {isConnecting ? "Connecting..." : "Link"}
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
+            <div className="text-xs text-muted">
+              Used to publish and sync channels
             </div>
           </div>
-        </div>
-
-        {/* Right Column: Payload & Distribution Settings (7 cols) */}
-        <div className="lg:col-span-7 space-y-3">
-          {/* Post Details Card */}
-          <div className="p-4 rounded-lg bg-surface border border-border space-y-3">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold text-foreground tracking-tight flex items-center gap-1.5">
-                <Sparkles className="w-3.5 h-3.5 text-foreground" />
-                Post Content & Metadata
-              </span>
-              <span className="text-[10px] text-muted font-mono">
-                {title.length}/100 chars
-              </span>
-            </div>
-
-            <div className="space-y-2.5">
-              <div>
-                <label className="block text-[11px] font-medium text-foreground mb-1">
-                  Post Title & Hashtags
-                </label>
-                <input
-                  type="text"
-                  value={title}
-                  onChange={(e) => setTitle(e.target.value)}
-                  placeholder="Title and hashtags..."
-                  className="w-full px-2.5 py-1.5 rounded-md text-xs bg-field border border-border text-foreground placeholder:text-muted focus:outline-none focus:border-foreground transition"
-                  required
-                />
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-medium text-foreground mb-1">
-                  Description & Caption
-                </label>
-                <textarea
-                  rows={3}
-                  value={description}
-                  onChange={(e) => setDescription(e.target.value)}
-                  placeholder="Caption for social channels..."
-                  className="w-full px-2.5 py-1.5 rounded-md text-xs bg-field border border-border text-foreground placeholder:text-muted focus:outline-none focus:border-foreground transition"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-medium text-foreground mb-1">
-                  Video File Location
-                </label>
-                <div className="relative">
-                  <Film className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted" />
-                  <input
-                    type="text"
-                    value={videoPath}
-                    onChange={(e) => setVideoPath(e.target.value)}
-                    placeholder="final_short.mp4"
-                    className="w-full pl-8 pr-2.5 py-1.5 rounded-md text-xs bg-field border border-border text-foreground placeholder:text-muted focus:outline-none focus:border-foreground font-mono transition"
-                    required
-                  />
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Schedule & Timing Card */}
-          <div className="p-4 rounded-lg bg-surface border border-border space-y-3">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold text-foreground tracking-tight flex items-center gap-1.5">
-                <Clock className="w-3.5 h-3.5 text-foreground" />
-                Distribution Timing
-              </span>
-              <div className="flex items-center gap-1 bg-surface-secondary p-0.5 rounded-md border border-border text-xs">
-                <button
-                  type="button"
-                  onClick={() => setPublishNow(true)}
-                  className={`px-2.5 py-0.5 rounded text-[11px] transition-colors cursor-pointer ${
-                    publishNow ? "bg-surface text-foreground font-semibold border border-border shadow-xs" : "text-muted hover:text-foreground"
-                  }`}
-                >
-                  Publish Now
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setPublishNow(false)}
-                  className={`px-2.5 py-0.5 rounded text-[11px] transition-colors cursor-pointer ${
-                    !publishNow ? "bg-surface text-foreground font-semibold border border-border shadow-xs" : "text-muted hover:text-foreground"
-                  }`}
-                >
-                  Schedule Later
-                </button>
-              </div>
-            </div>
-
-            {!publishNow && (
-              <motion.div 
-                initial={{ opacity: 0, height: 0 }}
-                animate={{ opacity: 1, height: "auto" }}
-                className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1 text-xs"
-              >
-                <div>
-                  <label className="block text-[10px] text-muted mb-1">Release Date</label>
-                  <input
-                    type="date"
-                    value={scheduledDate}
-                    onChange={(e) => setScheduledDate(e.target.value)}
-                    className="w-full px-2.5 py-1 rounded-md bg-field border border-border text-xs text-foreground focus:outline-none focus:border-foreground transition"
-                    required={!publishNow}
-                  />
-                </div>
-                <div>
-                  <label className="block text-[10px] text-muted mb-1">Release Time</label>
-                  <input
-                    type="time"
-                    value={scheduledTime}
-                    onChange={(e) => setScheduledTime(e.target.value)}
-                    className="w-full px-2.5 py-1 rounded-md bg-field border border-border text-xs text-foreground focus:outline-none focus:border-foreground transition"
-                    required={!publishNow}
-                  />
-                </div>
-                <div>
-                  <label className="block text-[10px] text-muted mb-1">Timezone</label>
-                  <select
-                    value={timezone}
-                    onChange={(e) => setTimezone(e.target.value)}
-                    className="w-full px-2.5 py-1 rounded-md bg-field border border-border text-xs text-foreground focus:outline-none focus:border-foreground transition"
-                  >
-                    <option value="Asia/Kolkata">Asia/Kolkata (IST)</option>
-                    <option value="America/New_York">America/New_York (EST)</option>
-                    <option value="America/Los_Angeles">America/Los_Angeles (PST)</option>
-                    <option value="Europe/London">Europe/London (GMT)</option>
-                    <option value="UTC">UTC</option>
-                  </select>
-                </div>
-              </motion.div>
-            )}
-          </div>
-
-          {/* Progress & Alert Messages */}
-          <AnimatePresence>
-            {isSubmitting && (
-              <div className="p-3 rounded-md bg-surface border border-border space-y-2 text-xs">
-                <div className="flex items-center justify-between text-muted">
-                  <div className="flex items-center gap-2">
-                    <Loader2 className="w-3.5 h-3.5 animate-spin text-foreground" />
-                    <span className="text-foreground font-medium text-[11px]">
-                      {submitStage}
-                    </span>
-                  </div>
-                  <span className="text-[10px] font-mono">Zernio REST</span>
-                </div>
-                <LinearProgress />
-              </div>
-            )}
-          </AnimatePresence>
-
-          {errorMessage && (
-            <div className="p-3 rounded-md bg-danger/10 border border-danger/30 text-danger text-xs flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <AlertCircle className="w-3.5 h-3.5 text-danger shrink-0" />
-                <span>{errorMessage}</span>
-              </div>
-              <button
-                type="button"
-                onClick={() => setErrorMessage(null)}
-                className="text-danger hover:underline text-xs cursor-pointer"
-              >
-                Dismiss
-              </button>
-            </div>
+          <TextInput
+            type="password"
+            placeholder="zr_live_…"
+            value={apiKeyDraft}
+            onChange={(e) => setApiKeyDraft(e.target.value)}
+            className="font-mono text-sm"
+            aria-label="Zernio API key"
+          />
+          <Button isLoading={savingKey} onClick={async () => {
+            setSavingKey(true);
+            try { await onSaveApiKey(apiKeyDraft.trim()); }
+            catch (error) { setErrorMessage(String(error)); }
+            finally { setSavingKey(false); }
+          }}>Save key</Button>
+          {apiKey.trim() ? (
+            <Badge variant="success" dot className="shrink-0">
+              Active
+            </Badge>
+          ) : (
+            <Badge variant="warning" className="shrink-0">
+              Required
+            </Badge>
           )}
+        </div>
+      )}
 
-          {responseMessage && (
-            <div className="p-3 rounded-md bg-surface border border-border text-foreground text-xs space-y-2">
-              <div className="flex items-center justify-between border-b border-border pb-1.5">
-                <div className="flex items-center gap-1.5 text-success font-medium">
-                  <Check className="w-3.5 h-3.5" />
-                  <span>Dispatch Receipt</span>
-                </div>
+      {errorMessage && (
+        <Alert status="danger">
+          <Alert.Indicator>
+            <AlertCircle className="size-4" />
+          </Alert.Indicator>
+          <Alert.Content>
+            <Alert.Title>Couldn't complete the request</Alert.Title>
+            <Alert.Description>{errorMessage}</Alert.Description>
+          </Alert.Content>
+          <Button variant="ghost" size="sm" onClick={() => setErrorMessage(null)}>
+            Dismiss
+          </Button>
+        </Alert>
+      )}
+
+      <form
+        onSubmit={handlePublish}
+        className={`grid grid-cols-1 gap-5 lg:grid-cols-[minmax(0,1fr)_22rem] ${hasShort ? "items-start" : ""}`}
+      >
+        {/* Post */}
+        <SectionCard
+          title="Post"
+          description={
+            hasShort
+              ? "Title, description and tags come from Studio or Queue"
+              : availableShorts.length > 0
+                ? "Select a short to publish or schedule"
+                : "Nothing to publish yet"
+          }
+          actions={
+            hasShort && onClearShort ? (
+              <Button variant="ghost" size="sm" onClick={onClearShort}>
+                Change
+              </Button>
+            ) : undefined
+          }
+          footer={
+            hasShort ? (
+              <div className="flex w-full flex-wrap items-center justify-between gap-3">
+                <span className="text-xs text-muted">{submitHint}</span>
                 <Button
-                  variant="ghost"
-                  size="xs"
-                  icon={copiedResponse ? <Check className="w-3 h-3 text-success" /> : <Copy className="w-3 h-3" />}
-                  onClick={handleCopyResponse}
+                  type="submit"
+                  variant="primary"
+                  isLoading={isSubmitting}
+                  disabled={submitDisabled}
+                  title={submitHint}
+                  icon={publishNow ? <Send /> : <Clock />}
                 >
-                  {copiedResponse ? "Copied" : "Copy"}
+                  {publishNow
+                    ? `Publish to ${selectedPlatforms.length} channel${selectedPlatforms.length === 1 ? "" : "s"}`
+                    : "Add to queue"}
                 </Button>
               </div>
-              <pre className="text-muted text-[11px] whitespace-pre-wrap max-h-24 overflow-y-auto bg-surface-secondary p-2 rounded border border-border font-mono">
-                {responseMessage}
-              </pre>
+            ) : undefined
+          }
+        >
+          {!hasShort ? (
+            <ShortChooser
+              shorts={availableShorts}
+              onSelect={onSelectShort}
+              onDismissOutput={onDismissShortOutput}
+              onDeleteQueued={onDeleteQueuedShort}
+              onOpenStudio={onOpenStudio}
+              onOpenQueue={onOpenQueue}
+            />
+          ) : (
+            <div className="space-y-5">
+              <div className="flex gap-3.5">
+                <span className="flex h-20 w-[45px] shrink-0 items-center justify-center rounded-md border border-border bg-surface-tertiary text-muted">
+                  <Film className="size-4" />
+                </span>
+                <div className="min-w-0 flex-1 space-y-1.5">
+                  <p className="text-sm leading-snug font-semibold break-words text-foreground">
+                    {title}
+                  </p>
+                  <p
+                    className="truncate font-mono text-xs text-muted"
+                    title={videoPath}
+                  >
+                    {videoName}
+                  </p>
+                  {tags.length > 0 && (
+                    <div className="flex flex-wrap gap-1 pt-0.5">
+                      {tags.slice(0, 8).map((tag) => (
+                        <Badge key={tag} variant="neutral">
+                          {tag}
+                        </Badge>
+                      ))}
+                      {tags.length > 8 && (
+                        <span className="text-xs text-muted">
+                          +{tags.length - 8}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="space-y-3 border-t border-separator pt-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-medium text-foreground">
+                      When
+                    </div>
+                    <div className="text-xs text-muted">
+                      {publishNow
+                        ? "Goes out as soon as you publish"
+                        : "Saved to the Queue for the time below"}
+                    </div>
+                  </div>
+                  <Segmented
+                    label="Distribution timing"
+                    value={publishNow ? "now" : "later"}
+                    onChange={(v) => setPublishNow(v === "now")}
+                    options={[
+                      { value: "now", label: "Publish now" },
+                      { value: "later", label: "Schedule" },
+                    ]}
+                  />
+                </div>
+                {!publishNow && (
+                  <div className="grid grid-cols-1 items-end gap-3 sm:grid-cols-3">
+                    <Field label="Date">
+                      <TextInput
+                        type="date"
+                        value={scheduledDate}
+                        onChange={(e) => setScheduledDate(e.target.value)}
+                        required={!publishNow}
+                        aria-label="Release date"
+                      />
+                    </Field>
+                    <Field label="Time">
+                      <TextInput
+                        type="time"
+                        value={scheduledTime}
+                        onChange={(e) => setScheduledTime(e.target.value)}
+                        required={!publishNow}
+                        aria-label="Release time"
+                      />
+                    </Field>
+                    <Field label="Timezone">
+                      <Select
+                        variant="secondary"
+                        selectedKey={timezone}
+                        onSelectionChange={(key) => setTimezone(String(key))}
+                        aria-label="Timezone"
+                      >
+                        <Select.Trigger>
+                          <Select.Value />
+                          <Select.Indicator />
+                        </Select.Trigger>
+                        <Select.Popover>
+                          <ListBox>
+                            {TIMEZONES.map((tz) => (
+                              <ListBox.Item
+                                key={tz.id}
+                                id={tz.id}
+                                textValue={tz.label}
+                              >
+                                {tz.label}
+                              </ListBox.Item>
+                            ))}
+                          </ListBox>
+                        </Select.Popover>
+                      </Select>
+                    </Field>
+                  </div>
+                )}
+              </div>
+
+              {isSubmitting && (
+                <div className="space-y-2 rounded-md border border-border bg-surface-secondary p-3">
+                  <div className="flex items-center gap-2 text-xs font-medium text-foreground">
+                    <Spinner size="sm" color="current" />
+                    {submitStage}
+                  </div>
+                  <LinearProgress label="Publishing" />
+                </div>
+              )}
+
+              {responseMessage && (
+                <div className="overflow-hidden rounded-md border border-success/30 bg-success/5">
+                  <div className="flex items-center justify-between gap-2 px-3 py-2">
+                    <span className="flex items-center gap-1.5 text-sm font-medium text-foreground">
+                      <Check className="size-3.5 text-success" strokeWidth={3} />
+                      Gateway response
+                    </span>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      icon={copiedResponse ? <Check /> : <Copy />}
+                      onClick={handleCopyResponse}
+                    >
+                      {copiedResponse ? "Copied" : "Copy"}
+                    </Button>
+                  </div>
+                  <pre className=" max-h-28 overflow-y-auto border-t border-success/20 px-3 py-2 font-mono text-xs whitespace-pre-wrap text-muted">
+                    {responseMessage}
+                  </pre>
+                </div>
+              )}
             </div>
           )}
+        </SectionCard>
 
-          {/* Submit Action Bar */}
-          <div className="flex justify-end pt-1">
+        {/* Channels */}
+        <SectionCard
+          className={hasShort ? "lg:sticky lg:top-0" : undefined}
+          title="Channels"
+          description={`${selectedPlatforms.length} selected`}
+          actions={
             <Button
-              type="submit"
-              variant="primary"
+              variant="ghost"
               size="sm"
-              isLoading={isSubmitting}
-              disabled={isSubmitting || selectedPlatforms.length === 0}
-              icon={<Send className="w-3 h-3 fill-current" />}
+              onClick={handleSelectAll}
+              disabled={connectedIds.length === 0}
             >
-              {publishNow ? `Dispatch to ${selectedPlatforms.length} Channels` : "Queue for Scheduled Release"}
+              {selectedPlatforms.length === connectedIds.length &&
+              connectedIds.length > 0
+                ? "Clear"
+                : "Select all"}
             </Button>
-          </div>
-        </div>
+          }
+        >
+          <ul className="space-y-px">
+            {PLATFORMS.map((platform) => {
+              const Icon = platform.icon;
+              const isSelected = selectedPlatforms.includes(platform.id);
+              const acc = accounts.find(
+                (a) =>
+                  a.is_connected &&
+                  canonicalPlatformId(a.platform) === platform.id,
+              );
+              const isConnected = isPlatformConnected(accounts, platform.id);
+              const isConnecting = connectingPlatform === platform.id;
+
+              const glyph = (
+                <span
+                  className={`flex size-8 shrink-0 items-center justify-center rounded-md border ${
+                    isConnected
+                      ? "border-border bg-surface-secondary text-foreground"
+                      : "border-dashed border-border text-muted"
+                  }`}
+                >
+                  <Icon />
+                </span>
+              );
+
+              if (!isConnected) {
+                return (
+                  <li
+                    key={platform.id}
+                    className="flex items-center -mx-2 gap-3 rounded-xl px-2 py-2"
+                  >
+                    {glyph}
+                    <div className="min-w-0 flex-1 leading-tight">
+                      <div className="truncate text-sm font-medium text-foreground">
+                        {platform.name}
+                      </div>
+                      <div className="text-xs text-muted">Not linked</div>
+                    </div>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      isLoading={isConnecting}
+                      disabled={isConnecting || !apiKey.trim()}
+                      title={!apiKey.trim() ? "Add your Zernio API key first" : undefined}
+                      onClick={() => handleConnect(platform.id)}
+                    >
+                      {isConnecting ? "Linking" : "Link"}
+                    </Button>
+                  </li>
+                );
+              }
+
+              return (
+                <li key={platform.id}>
+                  <button
+                    type="button"
+                    role="checkbox"
+                    aria-checked={isSelected}
+                    onClick={() => togglePlatform(platform.id)}
+                    className={`flex w-full items-center -mx-2 gap-3 rounded-xl px-2 py-2 text-left transition-colors ${
+                      isSelected ? "bg-accent/8" : "hover:bg-surface-secondary"
+                    }`}
+                  >
+                    {glyph}
+                    <span className="min-w-0 flex-1 leading-tight">
+                      <span className="block truncate text-sm font-medium text-foreground">
+                        {platform.name}
+                      </span>
+                      <span className="block truncate text-xs text-muted">
+                        {acc ? accountLabel(acc) : "Connected"}
+                      </span>
+                    </span>
+                    <span
+                      className={`flex size-4 shrink-0 items-center justify-center rounded-[4px] border transition-colors ${
+                        isSelected
+                          ? "border-accent bg-accent text-accent-foreground"
+                          : "border-border-tertiary text-transparent"
+                      }`}
+                    >
+                      <Check className="size-3" strokeWidth={3.5} />
+                    </span>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </SectionCard>
       </form>
     </div>
   );

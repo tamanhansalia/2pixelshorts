@@ -1,0 +1,10 @@
+# video-use engine dependencies
+#
+# The scaffolded helpers are stdlib-only (argparse, json, subprocess,
+# shutil, urllib) plus external binaries — there is intentionally nothing
+# to pip-install for the core pipeline.
+#
+# Optional on-device transcription lives in requirements-local.txt
+# (faster-whisper, installed into the project-local video-use/.venv by
+# setup_local_stt.sh). The backend prefers that interpreter automatically
+# whenever it exists.

@@ -1,32 +1,46 @@
-import React, { useState } from "react";
-import { motion, AnimatePresence } from "framer-motion";
-import { 
-  Settings, 
-  Key, 
-  Check, 
-  ExternalLink, 
-  ShieldCheck, 
-  Eye, 
-  EyeOff, 
-  Cpu, 
-  Terminal, 
-  HardDrive,
-  CheckCircle2,
-  Palette
+import React, { useEffect, useRef, useState } from "react";
+import {
+  Check,
+  Cpu,
+  ExternalLink,
+  Eye,
+  EyeOff,
+  Key,
+  Monitor,
+  Moon,
+  Palette,
+  RefreshCw,
+  Sun,
+  Terminal,
+  TvMinimalPlay,
 } from "lucide-react";
+import { InputGroup, Tabs } from "@heroui/react";
 import { Button } from "../ui/Button";
+import { PageHeader } from "../layout/PageHeader";
 import { Badge } from "../ui/Badge";
-import { CliToolInfo, CommandOutput, HeroUiThemeId, HERO_UI_THEMES } from "../../types";
+import { SectionCard } from "../ui/Card";
+import { CliToolInfo, CommandOutput, TranscriptionStatus } from "../../types";
+import { openExternalUrl, probeTranscription, validateApiKey, isTauri } from "../../lib/ipc";
+import { createLatestGuard, isUnsavedEdit } from "../../lib/asyncLatest";
 import { CliManager } from "../cli/CliManager";
+import { ChannelProfiles } from "./ChannelProfiles";
+import type { ChannelProfile } from "../../lib/channelProfiles";
+import type { ColorMode } from "../layout/Sidebar";
 
-export type SettingsSubTab = "clis" | "keys" | "themes" | "engine";
+export type SettingsSubTab = "clis" | "keys" | "channel" | "appearance" | "engine";
 
 interface SettingsViewProps {
   zernioKey: string;
-  onSaveZernioKey: (key: string) => void;
+  onSaveZernioKey: (key: string) => Promise<void>;
   elevenLabsKey: string;
-  onSaveElevenLabsKey: (key: string) => void;
-  onTriggerToast?: (title: string, description?: string, type?: "success" | "error" | "info") => void;
+  onSaveElevenLabsKey: (key: string) => Promise<void>;
+  youtubeKey: string;
+  onSaveYoutubeKey: (key: string) => Promise<void>;
+  onTriggerToast?: (
+    title: string,
+    description?: string,
+    type?: "success" | "error" | "info",
+  ) => void;
   // CLI & Agent Props
   tools?: CliToolInfo[];
   isLoadingClis?: boolean;
@@ -37,16 +51,211 @@ interface SettingsViewProps {
   onRunCommand?: (command: string, args: string[]) => Promise<CommandOutput>;
   activeSubTab?: SettingsSubTab;
   onSubTabChange?: (tab: SettingsSubTab) => void;
-  // HeroUI Theme Props
-  currentTheme?: HeroUiThemeId;
-  onSelectTheme?: (theme: HeroUiThemeId) => void;
+  // Appearance
+  colorMode: ColorMode;
+  onColorModeChange: (mode: ColorMode) => void;
+  // Channel context profiles
+  channelProfiles: ChannelProfile[];
+  defaultChannelId: string | null;
+  onSaveChannelProfiles: (
+    profiles: ChannelProfile[],
+    defaultId: string | null,
+  ) => void;
+  // Complete local reset (clears storage, then reloads)
+  onResetAllData?: () => void;
 }
+
+const SETTINGS_NAV: {
+  id: SettingsSubTab;
+  label: string;
+  description: string;
+  icon: React.ReactNode;
+}[] = [
+  {
+    id: "clis",
+    label: "Tools & agents",
+    description: "Installed tools. Switches control the console below; Studio verifies its processing tools separately.",
+    icon: <Terminal />,
+  },
+  {
+    id: "keys",
+    label: "API keys",
+    description: "Credentials for publishing, transcription and trends. Stored only on this machine.",
+    icon: <Key />,
+  },
+  {
+    id: "channel",
+    label: "Channel",
+    description: "Context that steers AI cuts, titles and tags.",
+    icon: <TvMinimalPlay />,
+  },
+  {
+    id: "appearance",
+    label: "Appearance",
+    description: "Theme for the studio.",
+    icon: <Palette />,
+  },
+  {
+    id: "engine",
+    label: "Engine",
+    description: "Transcription and local processing.",
+    icon: <Cpu />,
+  },
+];
+
+const MODE_CARDS: { id: ColorMode; name: string; icon: React.ReactNode }[] = [
+  { id: "light", name: "Light", icon: <Sun className="size-3.5" /> },
+  { id: "dark", name: "Dark", icon: <Moon className="size-3.5" /> },
+  { id: "system", name: "System", icon: <Monitor className="size-3.5" /> },
+];
+
+type KeyStatus = "untested" | "valid" | "invalid";
+
+const KEY_STATUS_BADGE: Record<KeyStatus, React.ReactNode> = {
+  valid: (
+    <Badge variant="success" dot>
+      Verified
+    </Badge>
+  ),
+  invalid: <Badge variant="danger">Not verified</Badge>,
+  untested: <Badge variant="neutral">Not tested</Badge>,
+};
+
+/** One credential row: name, purpose, status, masked input and actions. */
+const ApiKeyRow: React.FC<{
+  name: string;
+  purpose: string;
+  status: KeyStatus;
+  value: string;
+  placeholder: string;
+  onChange: (value: string) => void;
+  onTest: () => void;
+  isTesting: boolean;
+  onOpenDashboard: () => void;
+}> = ({
+  name,
+  purpose,
+  status,
+  value,
+  placeholder,
+  onChange,
+  onTest,
+  isTesting,
+  onOpenDashboard,
+}) => {
+  const [visible, setVisible] = useState(false);
+  return (
+    <div className="space-y-2.5 py-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-semibold text-foreground">
+              {name}
+            </span>
+            {KEY_STATUS_BADGE[status]}
+          </div>
+          <p className="mt-0.5 text-xs text-muted">{purpose}</p>
+        </div>
+        <Button
+          variant="ghost"
+          size="sm"
+          icon={<ExternalLink />}
+          onClick={onOpenDashboard}
+        >
+          Get key
+        </Button>
+      </div>
+      <div className="flex items-center gap-2">
+        <InputGroup variant="secondary" fullWidth className="min-w-0 flex-1">
+          <InputGroup.Input
+            type={visible ? "text" : "password"}
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            placeholder={placeholder}
+            aria-label={`${name} API key`}
+            className="font-mono"
+          />
+          <InputGroup.Suffix>
+            <Button
+              variant="ghost"
+              size="sm"
+              iconOnly
+              icon={visible ? <EyeOff /> : <Eye />}
+              onClick={() => setVisible((v) => !v)}
+              aria-label={visible ? "Hide key" : "Show key"}
+              title={visible ? "Hide key" : "Show key"}
+            />
+          </InputGroup.Suffix>
+        </InputGroup>
+        <Button variant="secondary" isLoading={isTesting} onClick={onTest}>
+          Test
+        </Button>
+      </div>
+    </div>
+  );
+};
+
+/** Label/description on the left, control on the right. */
+const SettingRow: React.FC<{
+  title: React.ReactNode;
+  description?: React.ReactNode;
+  children?: React.ReactNode;
+}> = ({ title, description, children }) => (
+  <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-2 py-3">
+    <div className="min-w-0 flex-1">
+      <div className="text-sm font-medium text-foreground">{title}</div>
+      {description && (
+        <div className="mt-0.5 text-xs leading-relaxed text-muted">
+          {description}
+        </div>
+      )}
+    </div>
+    {children && <div className="flex shrink-0 items-center gap-2">{children}</div>}
+  </div>
+);
+
+/** Small preview tile drawn in the target theme's own colors. */
+const ThemePreview: React.FC<{ mode: ColorMode }> = ({ mode }) => {
+  const pane = (dark: boolean) => (
+    <div
+      className={`flex h-full flex-1 gap-1 p-1.5 ${dark ? "bg-[#141416]" : "bg-[#f6f6f7]"}`}
+    >
+      <div
+        className={`w-1/4 space-y-1 rounded-[3px] p-1 ${dark ? "bg-[#0f0f11]" : "bg-[#ececee]"}`}
+      >
+        <div className={`h-1 rounded-full ${dark ? "bg-white/25" : "bg-black/20"}`} />
+        <div className={`h-1 w-2/3 rounded-full ${dark ? "bg-white/15" : "bg-black/10"}`} />
+      </div>
+      <div
+        className={`flex-1 space-y-1 rounded-[3px] border p-1.5 ${dark ? "border-white/10 bg-[#1b1b1e]" : "border-black/8 bg-white"}`}
+      >
+        <div className={`h-1 w-1/2 rounded-full ${dark ? "bg-white/30" : "bg-black/25"}`} />
+        <div className={`h-1 w-3/4 rounded-full ${dark ? "bg-white/12" : "bg-black/8"}`} />
+        <div className="mt-1.5 h-1.5 w-6 rounded-[2px] bg-[#6366f1]" />
+      </div>
+    </div>
+  );
+  return (
+    <div className="flex h-20 overflow-hidden rounded-md border border-border">
+      {mode === "system" ? (
+        <>
+          {pane(false)}
+          {pane(true)}
+        </>
+      ) : (
+        pane(mode === "dark")
+      )}
+    </div>
+  );
+};
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
   zernioKey,
   onSaveZernioKey,
   elevenLabsKey,
   onSaveElevenLabsKey,
+  youtubeKey,
+  onSaveYoutubeKey,
   onTriggerToast,
   tools = [],
   isLoadingClis = false,
@@ -54,11 +263,21 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   onToggleTool = () => {},
   onRemoveTool = () => {},
   onAddCustomTool = async () => {},
-  onRunCommand = async () => ({ success: true, code: 0, stdout: "", stderr: "" }),
+  onRunCommand = async () => ({
+    success: true,
+    code: 0,
+    stdout: "",
+    stderr: "",
+    fallback_used: false,
+  }),
   activeSubTab: controlledSubTab,
   onSubTabChange,
-  currentTheme = "default",
-  onSelectTheme = () => {},
+  colorMode,
+  onColorModeChange,
+  channelProfiles,
+  defaultChannelId,
+  onSaveChannelProfiles,
+  onResetAllData = () => {},
 }) => {
   const [internalSubTab, setInternalSubTab] = useState<SettingsSubTab>("clis");
   const currentSubTab = controlledSubTab ?? internalSubTab;
@@ -73,471 +292,466 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
   const [zKey, setZKey] = useState(zernioKey);
   const [elKey, setElKey] = useState(elevenLabsKey);
-  const [showZKey, setShowZKey] = useState(false);
-  const [showElKey, setShowElKey] = useState(false);
+  const [ytKey, setYtKey] = useState(youtubeKey);
   const [isSaving, setIsSaving] = useState(false);
   const [isSaved, setIsSaved] = useState(false);
 
+  // Draft inputs follow the saved props when they change outside this view
+  // (e.g. a key saved from Social, or the trim applied by our own Save).
+  useEffect(() => {
+    setZKey(zernioKey);
+  }, [zernioKey]);
+  useEffect(() => {
+    setElKey(elevenLabsKey);
+  }, [elevenLabsKey]);
+  useEffect(() => {
+    setYtKey(youtubeKey);
+  }, [youtubeKey]);
+
   const [testingZernio, setTestingZernio] = useState(false);
   const [testingElevenLabs, setTestingElevenLabs] = useState(false);
+  const [testingYoutube, setTestingYoutube] = useState(false);
 
-  const [zernioStatus, setZernioStatus] = useState<"untested" | "valid" | "invalid">(
-    zernioKey ? "valid" : "untested"
-  );
-  const [elevenLabsStatus, setElevenLabsStatus] = useState<"untested" | "valid" | "invalid">(
-    elevenLabsKey ? "valid" : "untested"
-  );
+  const [confirmingReset, setConfirmingReset] = useState(false);
 
-  const handleTestZernio = async () => {
-    if (!zKey.trim()) {
-      onTriggerToast?.("API Key Required", "Please enter a key before testing", "error");
-      return;
+  // Transcription readiness: what analysis would use, refreshed with the
+  // saved key. Null while probing or when the probe itself fails.
+  const [transcription, setTranscription] =
+    useState<TranscriptionStatus | null>(null);
+  const [isProbingStt, setIsProbingStt] = useState(false);
+
+  // Probes resolve out of order (spawning the interpreter is slow), so a
+  // stale probe with the previous key must never overwrite a newer result.
+  // Without this, a slow mount-time probe with the old empty key can land
+  // after the post-save probe and flip Engine back to "Missing".
+  const probeGuardRef = useRef(createLatestGuard());
+
+  const refreshTranscription = async (key: string) => {
+    const requestId = probeGuardRef.current.next();
+    setIsProbingStt(true);
+    try {
+      const status = await probeTranscription(key);
+      if (!probeGuardRef.current.isLatest(requestId)) return;
+      setTranscription(status);
+    } catch {
+      if (!probeGuardRef.current.isLatest(requestId)) return;
+      setTranscription(null);
+    } finally {
+      if (probeGuardRef.current.isLatest(requestId)) {
+        setIsProbingStt(false);
+      }
     }
-    setTestingZernio(true);
-    await new Promise((r) => setTimeout(r, 400));
-    if (zKey.trim().length >= 8) {
-      setZernioStatus("valid");
-      onTriggerToast?.("Zernio Verified", "API key pattern validated successfully", "success");
-    } else {
-      setZernioStatus("invalid");
-      onTriggerToast?.("Key Error", "Token appears too short or invalid", "error");
-    }
-    setTestingZernio(false);
   };
 
-  const handleTestElevenLabs = async () => {
-    if (!elKey.trim()) {
-      onTriggerToast?.("API Key Required", "Please enter a key before testing", "error");
+  useEffect(() => {
+    refreshTranscription(elevenLabsKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [elevenLabsKey]);
+
+  const [zernioStatus, setZernioStatus] = useState<
+    "untested" | "valid" | "invalid"
+  >("untested");
+  const [elevenLabsStatus, setElevenLabsStatus] = useState<
+    "untested" | "valid" | "invalid"
+  >("untested");
+  const [youtubeStatus, setYoutubeStatus] = useState<
+    "untested" | "valid" | "invalid"
+  >("untested");
+
+  useEffect(() => { setZernioStatus("untested"); setTestingZernio(false); keyTestGuards.current.zernio.next(); }, [zKey]);
+  useEffect(() => { setElevenLabsStatus("untested"); setTestingElevenLabs(false); keyTestGuards.current.elevenlabs.next(); }, [elKey]);
+  useEffect(() => { setYoutubeStatus("untested"); setTestingYoutube(false); keyTestGuards.current.youtube.next(); }, [ytKey]);
+  const keyTestGuards = useRef({ zernio: createLatestGuard(), elevenlabs: createLatestGuard(), youtube: createLatestGuard() });
+
+  const testKey = async (
+    provider: "zernio" | "elevenlabs" | "youtube", value: string,
+    setTesting: (testing: boolean) => void, setStatus: (status: KeyStatus) => void,
+  ) => {
+    if (!value.trim()) {
+      onTriggerToast?.("API key required", "Enter a key before testing", "error");
       return;
     }
-    setTestingElevenLabs(true);
-    await new Promise((r) => setTimeout(r, 400));
-    if (elKey.trim().length >= 10) {
-      setElevenLabsStatus("valid");
-      onTriggerToast?.("ElevenLabs Verified", "Transcription key recognized", "success");
-    } else {
-      setElevenLabsStatus("invalid");
-      onTriggerToast?.("Key Error", "Token appears too short or invalid", "error");
+    const guard = keyTestGuards.current[provider];
+    const requestId = guard.next();
+    setTesting(true);
+    try {
+      await validateApiKey(provider, value.trim());
+      if (!guard.isLatest(requestId)) return;
+      setStatus("valid");
+      onTriggerToast?.("Key verified", "The service accepted this API key", "success");
+    } catch (error) {
+      if (!guard.isLatest(requestId)) return;
+      setStatus("invalid");
+      onTriggerToast?.("Verification failed", String(error), "error");
+    } finally {
+      if (guard.isLatest(requestId)) setTesting(false);
     }
-    setTestingElevenLabs(false);
   };
+  const handleTestZernio = () => testKey("zernio", zKey, setTestingZernio, setZernioStatus);
+  const handleTestElevenLabs = () => testKey("elevenlabs", elKey, setTestingElevenLabs, setElevenLabsStatus);
+  const handleTestYoutube = () => testKey("youtube", ytKey, setTestingYoutube, setYoutubeStatus);
 
   const handleSave = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
+    e?.preventDefault();
     setIsSaving(true);
-    await new Promise((r) => setTimeout(r, 180));
-    onSaveZernioKey(zKey.trim());
-    onSaveElevenLabsKey(elKey.trim());
-    setIsSaving(false);
-    setIsSaved(true);
-    onTriggerToast?.("Preferences Saved", "Environment credentials updated locally", "success");
-    setTimeout(() => setIsSaved(false), 2500);
+    setIsSaved(false);
+    try {
+      await onSaveZernioKey(zKey.trim());
+      await onSaveElevenLabsKey(elKey.trim());
+      await onSaveYoutubeKey(ytKey.trim());
+      void refreshTranscription(elKey.trim());
+      setIsSaved(true);
+      onTriggerToast?.("Preferences saved", isTauri() ? "API keys saved in the system credential store" : "API keys kept for this preview session", "success");
+      setTimeout(() => setIsSaved(false), 2500);
+    } catch (error) {
+      onTriggerToast?.("Save failed", String(error), "error");
+    } finally {
+      setIsSaving(false);
+    }
   };
 
-  const availableCliCount = tools.filter((t) => t.is_available && t.is_enabled).length;
+  const handleOpenDashboard = async (url: string) => {
+    try {
+      await openExternalUrl(url);
+    } catch (err: unknown) {
+      onTriggerToast?.(
+        "Couldn't open browser",
+        err instanceof Error ? err.message : url,
+        "error",
+      );
+    }
+  };
+
+  const availableCliCount = tools.filter(
+    (t) => t.is_available && t.is_enabled,
+  ).length;
   const totalCliCount = tools.length;
 
+  // Engine reports on the SAVED key (what analysis actually uses), so when
+  // the typed draft differs, say so instead of silently showing "Missing".
+  const hasUnsavedElevenLabsEdit = isUnsavedEdit(elKey, elevenLabsKey);
+
+
+  const section = SETTINGS_NAV.find((s) => s.id === currentSubTab) ?? SETTINGS_NAV[0];
+
+  const engineCheck = (ok: boolean, label: string, detail: string) => (
+    <li className="flex items-center justify-between gap-3 py-2.5">
+      <span className="flex items-center gap-2 text-sm text-foreground">
+        <span
+          className={`flex size-4 items-center justify-center rounded-full ${
+            ok ? "bg-success/15 text-success" : "bg-surface-tertiary text-muted"
+          }`}
+        >
+          {ok ? (
+            <Check className="size-2.5" strokeWidth={3.5} />
+          ) : (
+            <span className="size-1 rounded-full bg-current" />
+          )}
+        </span>
+        {label}
+      </span>
+      <span className={`text-xs ${ok ? "text-muted" : "text-warning"}`}>
+        {detail}
+      </span>
+    </li>
+  );
+
   return (
-    <div className="space-y-4 max-w-6xl mx-auto select-none font-sans">
-      {/* Top Action Header with Segmented Section Switcher */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3 rounded-lg bg-surface border border-border">
-        <div className="flex items-center gap-2.5">
-          <div className="h-6 w-6 rounded bg-surface-secondary border border-border flex items-center justify-center text-foreground shrink-0">
-            <Settings className="w-3.5 h-3.5" />
-          </div>
-          <span className="text-xs font-semibold text-foreground tracking-tight">
-            Settings
-          </span>
-        </div>
-
-        {/* Segmented Sub-Tab Switcher */}
-        <div className="flex items-center gap-1 bg-surface-secondary p-0.5 rounded-md border border-border self-start sm:self-auto overflow-x-auto max-w-full">
-          <button
-            type="button"
-            onClick={() => handleTabChange("clis")}
-            className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs font-medium transition cursor-pointer whitespace-nowrap ${
-              currentSubTab === "clis"
-                ? "bg-surface text-foreground shadow-xs font-semibold border border-border/80"
-                : "text-muted hover:text-foreground"
-            }`}
-          >
-            <Terminal className="w-3.5 h-3.5" />
-            <span>CLI Tools & Agents</span>
-            <span className="text-[10px] font-mono px-1 py-0.2 rounded bg-surface-secondary text-muted border border-border/60">
-              {availableCliCount}/{totalCliCount}
-            </span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => handleTabChange("keys")}
-            className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs font-medium transition cursor-pointer whitespace-nowrap ${
-              currentSubTab === "keys"
-                ? "bg-surface text-foreground shadow-xs font-semibold border border-border/80"
-                : "text-muted hover:text-foreground"
-            }`}
-          >
-            <Key className="w-3.5 h-3.5" />
-            <span>API Keys</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => handleTabChange("themes")}
-            className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs font-medium transition cursor-pointer whitespace-nowrap ${
-              currentSubTab === "themes"
-                ? "bg-surface text-foreground shadow-xs font-semibold border border-border/80"
-                : "text-muted hover:text-foreground"
-            }`}
-          >
-            <Palette className="w-3.5 h-3.5" />
-            <span>HeroUI Themes</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => handleTabChange("engine")}
-            className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs font-medium transition cursor-pointer whitespace-nowrap ${
-              currentSubTab === "engine"
-                ? "bg-surface text-foreground shadow-xs font-semibold border border-border/80"
-                : "text-muted hover:text-foreground"
-            }`}
-          >
-            <Cpu className="w-3.5 h-3.5" />
-            <span>Engine & Privacy</span>
-          </button>
-        </div>
-      </div>
-
-      {/* Sub-Tab 1: CLI Tools & Agents Manager */}
-      {currentSubTab === "clis" && (
-        <CliManager
-          tools={tools}
-          isLoading={isLoadingClis}
-          onRefresh={onRefreshClis}
-          onToggleTool={onToggleTool}
-          onRemoveTool={onRemoveTool}
-          onAddCustomTool={onAddCustomTool}
-          onRunCommand={onRunCommand}
-        />
-      )}
-
-      {/* Sub-Tab 2: API Keys & Integrations */}
-      {currentSubTab === "keys" && (
-        <form onSubmit={handleSave} className="space-y-3.5">
-          {/* Zernio Key */}
-          <div className="p-4 rounded-lg bg-surface border border-border space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <div className="h-6 w-6 rounded bg-surface-secondary border border-border flex items-center justify-center text-foreground">
-                  <Key className="w-3.5 h-3.5 text-muted" />
-                </div>
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-semibold text-foreground tracking-tight">
-                      Zernio Social Gateway API Key
-                    </span>
-                    {zernioStatus === "valid" ? (
-                      <Badge variant="success" size="xs" dot>Verified</Badge>
-                    ) : (
-                      <Badge variant="default" size="xs">Untested</Badge>
-                    )}
-                  </div>
-                  <span className="text-[10px] text-muted">
-                    Used for dispatching and scheduling shorts across TikTok, YouTube, Instagram Reels, and X.
+    <div className="space-y-6">
+    <PageHeader
+      title="Settings"
+      description="Tools, API keys, channel and engine"
+    />
+    <div className="grid items-start gap-8 border-t border-separator pt-6 lg:grid-cols-[13rem_minmax(0,1fr)]">
+      <Tabs
+        orientation="vertical"
+        selectedKey={currentSubTab}
+        onSelectionChange={(key) =>
+          handleTabChange(String(key) as typeof currentSubTab)
+        }
+        className="w-full lg:sticky lg:top-0"
+      >
+        <Tabs.ListContainer className="w-full">
+          <Tabs.List aria-label="Settings sections" className="w-full">
+            {SETTINGS_NAV.map((item) => (
+              <Tabs.Tab
+                key={item.id}
+                id={item.id}
+                className="justify-start gap-2.5 [&_svg]:size-4"
+              >
+                {item.icon}
+                <span className="min-w-0 flex-1 truncate text-start">
+                  {item.label}
+                </span>
+                {item.id === "clis" && (
+                  <span className="tabular-nums text-xs text-muted">
+                    {availableCliCount}/{totalCliCount}
                   </span>
+                )}
+                <Tabs.Indicator />
+              </Tabs.Tab>
+            ))}
+          </Tabs.List>
+        </Tabs.ListContainer>
+      </Tabs>
+
+      <div className="min-w-0">
+        <div className="mb-5">
+          <h2 className="text-base font-semibold text-foreground">
+            {section.label}
+          </h2>
+          <p className="mt-0.5 text-sm text-muted">{section.description}</p>
+        </div>
+
+        <div className={currentSubTab === "clis" ? "min-w-0" : "hidden"}>
+          <CliManager
+            tools={tools}
+            isLoading={isLoadingClis}
+            onRefresh={onRefreshClis}
+            onToggleTool={onToggleTool}
+            onRemoveTool={onRemoveTool}
+            onAddCustomTool={onAddCustomTool}
+            onRunCommand={onRunCommand}
+          />
+        </div>
+
+        <div className={currentSubTab === "keys" ? "min-w-0" : "hidden"}>
+          <form onSubmit={handleSave} className="max-w-3xl">
+            <SectionCard
+              title="Credentials"
+              description={isTauri() ? "Saved in the system credential store; sent to the matching service when used" : "Browser preview: keys stay in memory for this session"}
+              contentClassName="p-0 divide-y divide-separator"
+              footer={
+                <div className="flex w-full items-center justify-between gap-3">
+                  <span
+                    className={`flex items-center gap-1.5 text-xs ${isSaved ? "font-medium text-success" : "text-muted"}`}
+                  >
+                    {isSaved && <Check className="size-3.5" strokeWidth={3} />}
+                    {isSaved ? "Saved" : "Changes apply after saving"}
+                  </span>
+                  <Button type="submit" variant="primary" isLoading={isSaving}>
+                    Save keys
+                  </Button>
                 </div>
-              </div>
-
-              <div className="flex items-center gap-1.5">
-                <Button
-                  variant="ghost"
-                  size="xs"
-                  isLoading={testingZernio}
-                  onClick={handleTestZernio}
-                >
-                  Test Key
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="xs"
-                  icon={<ExternalLink className="w-3 h-3" />}
-                  iconPlacement="end"
-                  onClick={() => window.open("https://zernio.com/app/settings/api-keys", "_blank")}
-                >
-                  Dashboard
-                </Button>
-              </div>
-            </div>
-
-            <div className="relative">
-              <input
-                type={showZKey ? "text" : "password"}
+              }
+            >
+              <ApiKeyRow
+                name="Zernio"
+                purpose="Publish and schedule shorts to TikTok, YouTube, Reels and X."
+                status={zernioStatus}
                 value={zKey}
-                onChange={(e) => {
-                  setZKey(e.target.value);
+                placeholder="zr_live_…"
+                onChange={(v) => {
+                  setZKey(v);
                   setZernioStatus("untested");
                 }}
-                placeholder="zr_live_..."
-                className="w-full pl-3 pr-9 py-1.5 rounded-md bg-field border border-border text-xs text-foreground placeholder:text-muted focus:outline-none focus:border-foreground font-mono transition"
+                onTest={handleTestZernio}
+                isTesting={testingZernio}
+                onOpenDashboard={() =>
+                  handleOpenDashboard("https://zernio.com/app/settings/api-keys")
+                }
               />
-              <button
-                type="button"
-                onClick={() => setShowZKey(!showZKey)}
-                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted hover:text-foreground cursor-pointer p-0.5"
-              >
-                {showZKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-              </button>
-            </div>
-          </div>
-
-          {/* ElevenLabs Key */}
-          <div className="p-4 rounded-lg bg-surface border border-border space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <div className="h-6 w-6 rounded bg-surface-secondary border border-border flex items-center justify-center text-foreground">
-                  <Key className="w-3.5 h-3.5 text-muted" />
-                </div>
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-semibold text-foreground tracking-tight">
-                      ElevenLabs Scribe Key
-                    </span>
-                    {elevenLabsStatus === "valid" ? (
-                      <Badge variant="success" size="xs" dot>Verified</Badge>
-                    ) : (
-                      <Badge variant="default" size="xs">Untested</Badge>
-                    )}
-                  </div>
-                  <span className="text-[10px] text-muted">
-                    Used for high-accuracy word-timestamp transcription when local VTT files are absent.
-                  </span>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-1.5">
-                <Button
-                  variant="ghost"
-                  size="xs"
-                  isLoading={testingElevenLabs}
-                  onClick={handleTestElevenLabs}
-                >
-                  Test Key
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="xs"
-                  icon={<ExternalLink className="w-3 h-3" />}
-                  iconPlacement="end"
-                  onClick={() => window.open("https://elevenlabs.io/app/settings/api-keys", "_blank")}
-                >
-                  Dashboard
-                </Button>
-              </div>
-            </div>
-
-            <div className="relative">
-              <input
-                type={showElKey ? "text" : "password"}
+              <ApiKeyRow
+                name="ElevenLabs Scribe"
+                purpose="Word-timestamp transcription when no local captions exist."
+                status={elevenLabsStatus}
                 value={elKey}
-                onChange={(e) => {
-                  setElKey(e.target.value);
+                placeholder="sk_…"
+                onChange={(v) => {
+                  setElKey(v);
                   setElevenLabsStatus("untested");
                 }}
-                placeholder="sk_..."
-                className="w-full pl-3 pr-9 py-1.5 rounded-md bg-field border border-border text-xs text-foreground placeholder:text-muted focus:outline-none focus:border-foreground font-mono transition"
+                onTest={handleTestElevenLabs}
+                isTesting={testingElevenLabs}
+                onOpenDashboard={() =>
+                  handleOpenDashboard("https://elevenlabs.io/app/settings/api-keys")
+                }
               />
-              <button
-                type="button"
-                onClick={() => setShowElKey(!showElKey)}
-                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted hover:text-foreground cursor-pointer p-0.5"
+              <ApiKeyRow
+                name="YouTube Data API"
+                purpose="Trending Shorts keywords used to boost tags."
+                status={youtubeStatus}
+                value={ytKey}
+                placeholder="AIza…"
+                onChange={(v) => {
+                  setYtKey(v);
+                  setYoutubeStatus("untested");
+                }}
+                onTest={handleTestYoutube}
+                isTesting={testingYoutube}
+                onOpenDashboard={() =>
+                  handleOpenDashboard(
+                    "https://console.cloud.google.com/apis/library/youtube.googleapis.com",
+                  )
+                }
+              />
+            </SectionCard>
+          </form>
+        </div>
+
+        <div className={currentSubTab === "appearance" ? "min-w-0" : "hidden"}>
+          <div className="max-w-3xl">
+            <SectionCard title="Theme" description="Applied instantly">
+              <div
+                className="grid grid-cols-1 gap-3 sm:grid-cols-3"
+                role="radiogroup"
+                aria-label="Color mode"
               >
-                {showElKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-              </button>
-            </div>
-          </div>
-
-          {/* Save Bar */}
-          <div className="flex items-center justify-between pt-2">
-            <AnimatePresence>
-              {isSaved ? (
-                <motion.span 
-                  initial={{ opacity: 0, x: -6 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  exit={{ opacity: 0 }}
-                  className="text-xs text-success flex items-center gap-1.5 font-medium"
-                >
-                  <Check className="w-3.5 h-3.5 stroke-[3]" />
-                  <span>Preferences saved to local application storage</span>
-                </motion.span>
-              ) : (
-                <span className="text-[11px] text-muted">
-                  Credentials are encrypted in local storage.
-                </span>
-              )}
-            </AnimatePresence>
-
-            <Button
-              type="submit"
-              variant="primary"
-              size="sm"
-              isLoading={isSaving}
-            >
-              Save Configuration
-            </Button>
-          </div>
-        </form>
-      )}
-
-      {/* Sub-Tab 3: HeroUI Official Themes Gallery */}
-      {currentSubTab === "themes" && (
-        <div className="space-y-4">
-          <div className="p-3.5 rounded-lg bg-surface border border-border flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <Palette className="w-4 h-4 text-foreground" />
-              <span className="text-xs font-semibold text-foreground tracking-tight">
-                HeroUI Themes
-              </span>
-            </div>
-
-            <Button
-              variant="ghost"
-              size="xs"
-              icon={<ExternalLink className="w-3 h-3" />}
-              iconPlacement="end"
-              onClick={() => window.open("https://heroui.com/docs/themes", "_blank")}
-            >
-              Docs
-            </Button>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
-            {HERO_UI_THEMES.map((theme) => {
-              const isSelected = currentTheme === theme.id;
-              return (
-                <div
-                  key={theme.id}
-                  onClick={() => onSelectTheme(theme.id)}
-                  className={`p-3 rounded-lg border text-left transition-all cursor-pointer flex flex-col justify-between group ${
-                    isSelected
-                      ? "border-foreground bg-surface-secondary shadow-xs ring-1 ring-foreground/20"
-                      : "border-border bg-surface hover:border-muted hover:bg-surface-secondary/50"
-                  }`}
-                >
-                  <div className="space-y-2.5">
-                    {/* Header: Name & Indicator */}
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-xs font-semibold text-foreground">
-                        {theme.name}
+                {MODE_CARDS.map((mode) => {
+                  const isSelected = colorMode === mode.id;
+                  return (
+                    <button
+                      key={mode.id}
+                      type="button"
+                      role="radio"
+                      aria-checked={isSelected}
+                      onClick={() => onColorModeChange(mode.id)}
+                      className={`rounded-lg border p-2 text-left transition-colors ${
+                        isSelected
+                          ? "border-accent ring-2 ring-accent/20"
+                          : "border-border hover:border-border-tertiary"
+                      }`}
+                    >
+                      <ThemePreview mode={mode.id} />
+                      <span className="mt-2 flex items-center gap-1.5 px-0.5 text-sm font-medium text-foreground">
+                        <span className="text-muted">{mode.icon}</span>
+                        {mode.name}
+                        {isSelected && (
+                          <Check className="ml-auto size-3.5 text-accent" strokeWidth={3} />
+                        )}
                       </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </SectionCard>
+          </div>
+        </div>
 
-                      {isSelected ? (
-                        <div className="w-3.5 h-3.5 rounded-full bg-foreground text-background flex items-center justify-center shrink-0">
-                          <Check className="w-2.5 h-2.5 stroke-[3]" />
-                        </div>
-                      ) : (
-                        <span
-                          className="w-3 h-3 rounded-full border border-white/20 shrink-0"
-                          style={{ backgroundColor: theme.accent }}
-                        />
-                      )}
-                    </div>
+        <div className={currentSubTab === "channel" ? "min-w-0" : "hidden"}>
+          <ChannelProfiles
+            profiles={channelProfiles}
+            defaultId={defaultChannelId}
+            onSave={onSaveChannelProfiles}
+          />
+        </div>
 
-                    {/* Color Swatch Strip */}
-                    <div className="p-2 rounded-md border border-border flex items-center justify-between gap-2" style={{ backgroundColor: theme.background }}>
-                      <div className="flex items-center gap-1.5">
-                        <div
-                          className="w-4 h-4 rounded border border-white/10 flex items-center justify-center text-[9px] font-bold"
-                          style={{ backgroundColor: theme.accent, color: theme.id === "spotify" ? "#000" : "#fff" }}
-                        >
-                          2P
-                        </div>
-                        <div className="text-[10px] font-mono px-1.5 py-0.2 rounded border border-border/80" style={{ backgroundColor: theme.surface, color: "#fff" }}>
-                          Surface
-                        </div>
-                      </div>
-
-                      <div className="flex items-center gap-1">
-                        <span className="w-2 h-2 rounded-full border border-black/30" style={{ backgroundColor: theme.accent }} />
-                        <span className="w-2 h-2 rounded-full border border-white/10" style={{ backgroundColor: theme.surface }} />
-                        <span className="w-2 h-2 rounded-full border border-white/10" style={{ backgroundColor: theme.background }} />
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Bottom Action */}
-                  <div className="pt-2 mt-2 border-t border-border flex items-center justify-end">
-                    <span className={`text-[11px] font-medium ${isSelected ? "text-foreground font-semibold" : "text-muted group-hover:text-foreground"}`}>
-                      {isSelected ? "Active" : "Apply"}
-                    </span>
-                  </div>
+        <div className={currentSubTab === "engine" ? "min-w-0" : "hidden"}>
+          <div className="max-w-3xl space-y-5">
+            <SectionCard
+              title="Transcription"
+              description={
+                transcription
+                  ? transcription.active_engine === "elevenlabs"
+                    ? "Using ElevenLabs Scribe"
+                    : transcription.active_engine === "local"
+                      ? `Using local faster-whisper (${transcription.local_model})`
+                      : "No engine configured"
+                  : isProbingStt
+                    ? "Checking engines…"
+                    : "Status unavailable"
+              }
+              contentClassName="p-0"
+              actions={
+                <Button
+                  variant="ghost"
+                  icon={<RefreshCw />}
+                  isLoading={isProbingStt}
+                  onClick={() => refreshTranscription(elevenLabsKey)}
+                  title="Re-check transcription engines"
+                >
+                  Recheck
+                </Button>
+              }
+            >
+              {hasUnsavedElevenLabsEdit && (
+                <div className="mb-2 rounded-xl bg-warning/10 px-3 py-3 text-xs leading-relaxed text-muted">
+                  Unsaved key changes — press Save keys under API keys, then
+                  Recheck, for Engine to pick them up.
                 </div>
-              );
-            })}
+              )}
+              {transcription ? (
+                <>
+                  <ul className="divide-y divide-separator">
+                    {engineCheck(
+                      transcription.elevenlabs_key_configured,
+                      "ElevenLabs API key",
+                      transcription.elevenlabs_key_configured
+                        ? "Saved"
+                        : "Missing — add under API keys",
+                    )}
+                    {engineCheck(
+                      transcription.local_available,
+                      "Local faster-whisper",
+                      transcription.local_available ? "Installed" : "Not installed",
+                    )}
+                    {engineCheck(
+                      transcription.ffmpeg_available,
+                      "FFmpeg audio extraction",
+                      transcription.ffmpeg_available ? "Available" : "Missing",
+                    )}
+                  </ul>
+                  {transcription.active_engine === "none" && (
+                    <div className="mt-2 rounded-xl bg-warning/10 px-3 py-3 text-xs leading-relaxed text-muted">
+                      Analysis and captions need a transcript. Save an
+                      ElevenLabs key, or install local transcription once from
+                      the project root:
+                      <code className="mt-1.5 block w-fit max-w-full rounded bg-surface-tertiary px-1.5 py-0.5 font-mono text-xs break-all text-foreground">
+                        cd video-use &amp;&amp; ./setup_local_stt.sh
+                      </code>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <p className="py-3 text-xs text-muted">
+                  {isProbingStt
+                    ? "Checking transcription engines…"
+                    : "Engine status unavailable — press Recheck."}
+                </p>
+              )}
+            </SectionCard>
+
+            <SectionCard title="Processing" contentClassName="p-0">
+              <SettingRow
+                title="Local-first"
+                description="Encoding, silence detection, caption burn-in and CLI scripts run on this machine. Only the finished short is uploaded, and only when you publish."
+              />
+            </SectionCard>
+
+            <section className="rounded-3xl border border-danger/30 bg-surface shadow-surface">
+              <SettingRow
+                title="Reset all local data"
+                description="Removes API keys, the post queue, render history, studio projects, channel profiles and sidebar state, then reloads. Cannot be undone."
+              >
+                {confirmingReset ? (
+                  <>
+                    <Button variant="ghost" onClick={() => setConfirmingReset(false)}>
+                      Cancel
+                    </Button>
+                    <Button
+                      variant="danger"
+                      onClick={() => {
+                        setConfirmingReset(false);
+                        onResetAllData();
+                      }}
+                    >
+                      Yes, reset everything
+                    </Button>
+                  </>
+                ) : (
+                  <Button
+                    variant="danger-soft"
+                    onClick={() => setConfirmingReset(true)}
+                  >
+                    Reset…
+                  </Button>
+                )}
+              </SettingRow>
+            </section>
           </div>
         </div>
-      )}
-
-      {/* Sub-Tab 4: Engine & Privacy */}
-      {currentSubTab === "engine" && (
-        <div className="space-y-3.5">
-          <div className="p-4 rounded-lg bg-surface border border-border space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 text-foreground text-xs font-semibold">
-                <ShieldCheck className="w-4 h-4 text-success" />
-                <span>Local Hardware & Privacy Isolation</span>
-              </div>
-              <Badge variant="success" size="xs">Active Isolation</Badge>
-            </div>
-            <p className="text-[11px] text-muted leading-relaxed">
-              All video encoding, silence detection, subtitle burns, and CLI scripts execute locally on your machine via FFmpeg and Python. Your raw video frames and audio never leave your local workstation.
-            </p>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-            <div className="p-3.5 rounded-lg bg-surface border border-border space-y-1.5">
-              <div className="flex items-center gap-2 text-xs font-semibold text-foreground">
-                <Cpu className="w-3.5 h-3.5 text-muted" />
-                <span>FFmpeg Engine</span>
-              </div>
-              <p className="text-[11px] text-muted">
-                Hardware-accelerated H.264 rendering with multi-threaded audio filter graph.
-              </p>
-              <div className="pt-1 flex items-center gap-1.5 text-[10px] font-mono text-success">
-                <CheckCircle2 className="w-3 h-3" />
-                <span>Local Binary Active</span>
-              </div>
-            </div>
-
-            <div className="p-3.5 rounded-lg bg-surface border border-border space-y-1.5">
-              <div className="flex items-center gap-2 text-xs font-semibold text-foreground">
-                <HardDrive className="w-3.5 h-3.5 text-muted" />
-                <span>Temp Artifacts</span>
-              </div>
-              <p className="text-[11px] text-muted">
-                Intermediary VTT and normalized audio streams stored in project cache.
-              </p>
-              <div className="pt-1 flex items-center gap-1.5 text-[10px] font-mono text-muted">
-                <span>Auto-cleaned on finish</span>
-              </div>
-            </div>
-
-            <div className="p-3.5 rounded-lg bg-surface border border-border space-y-1.5">
-              <div className="flex items-center gap-2 text-xs font-semibold text-foreground">
-                <Terminal className="w-3.5 h-3.5 text-muted" />
-                <span>CLI Execution Security</span>
-              </div>
-              <p className="text-[11px] text-muted">
-                Process spawn isolation ensures scripts run strictly with user privileges.
-              </p>
-              <div className="pt-1 flex items-center gap-1.5 text-[10px] font-mono text-success">
-                <CheckCircle2 className="w-3 h-3" />
-                <span>Sandboxed Subprocess</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+      </div>
+    </div>
     </div>
   );
 };

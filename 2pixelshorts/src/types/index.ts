@@ -15,6 +15,8 @@ export interface CommandOutput {
   code: number;
   stdout: string;
   stderr: string;
+  /** True when the basic ffmpeg fallback rendered this output. */
+  fallback_used: boolean;
 }
 
 export interface VideoMetadata {
@@ -60,6 +62,10 @@ export interface SocialPublishPayload {
   timezone?: string;
   publish_now: boolean;
   account_ids?: string[];
+  tags?: string[];
+  media_url?: string;
+  /** Queue entry id, sent as `Idempotency-Key` so gateway retries are safe. */
+  idempotency_key?: string;
 }
 
 export interface VideoReviewReport {
@@ -70,6 +76,17 @@ export interface VideoReviewReport {
   target_audience: string;
   suggested_pacing: string;
   word_count?: number;
+  takes_count?: number;
+  segment_count?: number;
+  output_duration?: number;
+  speech_wps?: number;
+  transcript_source?: string;
+}
+
+export interface SeoQualityCheck {
+  id: string;
+  got: number;
+  of: number;
 }
 
 export interface SeoMetadata {
@@ -79,6 +96,9 @@ export interface SeoMetadata {
   tags: string[];
   hashtags: string[];
   seo_score: number;
+  /** Package-quality figure (0-100) from the engine scorer; additive. */
+  quality_score?: number | null;
+  quality_checks?: SeoQualityCheck[];
   keywords_analyzed?: string[];
   review_report?: VideoReviewReport;
 }
@@ -93,12 +113,20 @@ export interface RenderShortParams {
   subtitle_size?: "compact" | "standard" | "large" | string;
   subtitle_case?: "uppercase" | "title" | "sentence" | string;
   target_duration?: number;
+  aspect_ratio?: string;
+  cut_start?: number;
+  cut_end?: number;
   prompt_hook?: string;
   elevenlabs_key?: string;
   channel_context?: string;
   meta_title?: string;
   meta_desc?: string;
   meta_tags?: string;
+  /** auto = detect, single = face-centered crop, screen-top / face-top =
+   * face + screen split, face-only = face zoom. */
+  layout?: string;
+  /** Always "auto": the engine detects the face itself. */
+  face_roi?: string;
 }
 
 export interface ScheduleItem {
@@ -110,137 +138,82 @@ export interface ScheduleItem {
   timezone: string;
   status: "queued" | "publishing" | "completed" | "failed";
   created_at: string;
+  post_id?: string;
+  remote_status?: string;
+  /** Full payload kept for re-dispatch from the queue (Post now). */
+  description?: string;
+  tags?: string[];
+  account_ids?: string[];
+  /** Last dispatch error, shown on the row. */
+  error?: string | null;
 }
 
-export type GlobalTaskStatus = 
+export type GlobalTaskStatus =
   | { type: "idle" }
   | { type: "scanning"; label: string }
   | { type: "probing"; label: string }
   | { type: "rendering"; label: string; progress?: number }
+  | { type: "analyzing"; label: string }
   | { type: "publishing"; label: string };
 
-export type HeroUiThemeId = 
-  | "default" 
-  | "black" 
-  | "sky" 
-  | "lavender" 
-  | "mint" 
-  | "netflix" 
-  | "spotify" 
-  | "discord" 
-  | "rabbit" 
-  | "coinbase" 
-  | "airbnb";
+export type JobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 
-export interface HeroUiThemeConfig {
-  id: HeroUiThemeId;
-  name: string;
-  tag: string;
-  accent: string;
-  background: string;
-  surface: string;
-  description: string;
+/** Which transcription engine `auto` would use (see probe_transcription). */
+export interface TranscriptionStatus {
+  elevenlabs_key_configured: boolean;
+  local_available: boolean;
+  local_model: string;
+  ffmpeg_available: boolean;
+  active_engine: "elevenlabs" | "local" | "none";
 }
 
-export const HERO_UI_THEMES: HeroUiThemeConfig[] = [
-  {
-    id: "default",
-    name: "HeroUI Default",
-    tag: "Modern Electric",
-    accent: "#006FEE",
-    background: "#090b10",
-    surface: "#11141c",
-    description: "Official HeroUI electric blue with high-contrast obsidian slate surfaces",
-  },
-  {
-    id: "black",
-    name: "Black / Obsidian",
-    tag: "Monochrome Pro",
-    accent: "#FFFFFF",
-    background: "#090a0d",
-    surface: "#111317",
-    description: "Monochrome stark white accent on deep obsidian carbon workstation",
-  },
-  {
-    id: "sky",
-    name: "Sky",
-    tag: "Cyan Electric",
-    accent: "#0ea5e9",
-    background: "#080f18",
-    surface: "#0f1c2b",
-    description: "Airy, high-luminance cyan and deep oceanic navy panels",
-  },
-  {
-    id: "lavender",
-    name: "Lavender",
-    tag: "Vibrant Violet",
-    accent: "#a855f7",
-    background: "#0f0a17",
-    surface: "#181024",
-    description: "Rich purple hue with deep violet contrast and soft neon aura",
-  },
-  {
-    id: "mint",
-    name: "Mint",
-    tag: "Fresh Emerald",
-    accent: "#10b981",
-    background: "#06140f",
-    surface: "#0c2119",
-    description: "Crisp emerald mint accent with dark botanical undertones",
-  },
-  {
-    id: "netflix",
-    name: "Netflix",
-    tag: "Cinematic Crimson",
-    accent: "#e50914",
-    background: "#0d0d0e",
-    surface: "#161618",
-    description: "High-contrast cinematic red on pitch dark charcoal panels",
-  },
-  {
-    id: "spotify",
-    name: "Spotify",
-    tag: "Neon Sound",
-    accent: "#1ed760",
-    background: "#0b110d",
-    surface: "#121c15",
-    description: "Signature neon audio green on deep studio black surfaces",
-  },
-  {
-    id: "discord",
-    name: "Discord",
-    tag: "Console Blurple",
-    accent: "#5865f2",
-    background: "#10121a",
-    surface: "#1a1c26",
-    description: "Iconic console indigo blurple with sleek dark slate panels",
-  },
-  {
-    id: "coinbase",
-    name: "Coinbase",
-    tag: "Royal Blue",
-    accent: "#0052ff",
-    background: "#080c18",
-    surface: "#0f1629",
-    description: "Electric royal blue on crisp modern slate",
-  },
-  {
-    id: "rabbit",
-    name: "Rabbit",
-    tag: "Cyber Orange",
-    accent: "#ff5a00",
-    background: "#130c08",
-    surface: "#1f140e",
-    description: "High-energy cybernetic amber orange on warm obsidian",
-  },
-  {
-    id: "airbnb",
-    name: "Airbnb",
-    tag: "Coral Rose",
-    accent: "#ff385c",
-    background: "#14080d",
-    surface: "#200f16",
-    description: "Warm coral and rose quartz on velvety midnight surfaces",
-  },
-];
+export interface RenderJobInfo {
+  id: string;
+  kind: string;
+  status: JobStatus;
+  progress: number;
+  stage: string;
+  input_video: string;
+  output_video: string;
+  created_at: string;
+  finished_at: string | null;
+  result: CommandOutput | null;
+  error: string | null;
+}
 
+export interface RenderJobProgress {
+  job_id: string;
+  progress: number;
+  stage: string;
+  line: string;
+  done: boolean;
+}
+
+export interface AgentProbe {
+  agent: string;
+  available: boolean;
+  binary: string | null;
+  path: string | null;
+  note: string;
+}
+
+export interface TrendingKeyword {
+  term: string;
+  score: number;
+  sources?: number;
+}
+
+export interface TrendingVideo {
+  title: string;
+  channel: string;
+}
+
+export interface TrendingResult {
+  niche: string;
+  keywords: TrendingKeyword[];
+  videos: TrendingVideo[];
+  fetched_at: string | null;
+  cached: boolean;
+  note?: string;
+  error?: string;
+}

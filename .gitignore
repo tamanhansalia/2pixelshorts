@@ -1,0 +1,19 @@
+# Rendered / intermediate video outputs — never track these
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.webm
+*.m4v
+
+# Scratch work and temp edit folders
+scratch/
+edit_tmp/
+
+# Local machine metadata, environments, and credentials
+.DS_Store
+.venv
+.env
+.env.*
+!.env.example
+!.env.sample

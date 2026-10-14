@@ -1,16 +1,47 @@
 <!doctype html>
-<html lang="en" class="dark" data-theme="dark">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>2PixelShorts Studio</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:ital,wght@0,400..700;1,400..700&display=swap" rel="stylesheet">
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f9f9fa" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0e0e10" />
+    <title>2pixelshorts Studio</title>
+    <script>
+      // Apply the persisted HeroUI color mode before first paint (no flash).
+      // Matches `useTheme` from @heroui/react (storage key `heroui-theme`).
+      (function () {
+        try {
+          var stored = localStorage.getItem("heroui-theme") || "light";
+          var resolved =
+            stored === "system"
+              ? window.matchMedia("(prefers-color-scheme: dark)").matches
+                ? "dark"
+                : "light"
+              : stored;
+          document.documentElement.classList.add(resolved);
+          document.documentElement.setAttribute("data-theme", resolved);
+        } catch (e) {
+          document.documentElement.classList.add("light");
+          document.documentElement.setAttribute("data-theme", "light");
+        }
+      })();
+    </script>
+    <style>
+      /* App `--background` in hex, painted before CSS loads (no flash). */
+      html {
+        background-color: #f9f9fa;
+      }
+      html.dark {
+        background-color: #0e0e10;
+      }
+    </style>
   </head>
 
-  <body class="bg-background text-foreground antialiased font-sans">
+  <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

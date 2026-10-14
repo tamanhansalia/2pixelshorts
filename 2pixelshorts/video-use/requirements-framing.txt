@@ -1,0 +1,2 @@
+# YuNet DNN face detection, including small webcams, side poses and glasses.
+opencv-python-headless>=4.10,<5

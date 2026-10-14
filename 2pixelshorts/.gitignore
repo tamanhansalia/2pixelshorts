@@ -22,3 +22,15 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Python (video-use engine)
+__pycache__/
+*.py[cod]
+.venv/
+.cache/
+takes_packed.md
+words.json
+edl.json
+
+# Local render QA and corrected review exports
+framing-review/

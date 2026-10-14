@@ -17,14 +17,23 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+# Display/binary name shown in the OS taskbar & dock. The package/lib names
+# stay as-is (a leading digit is not a valid Rust library identifier).
+[[bin]]
+name = "2pixelshorts"
+path = "src/main.rs"
+
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["process", "sync", "time", "macros", "rt"] }
+tokio = { version = "1", features = ["process", "sync", "time", "macros", "rt", "io-util"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 chrono = { version = "0.4", features = ["serde"] }
+keyring = { version = "3.6.3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
+libc = "0.2"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

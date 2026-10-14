@@ -1,53 +1,77 @@
 import React from "react";
-import { Card as HeroCard } from "@heroui/react";
+import { Card } from "@heroui/react";
+import { cn } from "../../lib/utils";
 
-export interface CardProps extends React.HTMLAttributes<HTMLDivElement> {
-  children: React.ReactNode;
-  variant?: "default" | "elevated" | "flat" | "interactive";
-  className?: string;
-}
-
-export const Card: React.FC<CardProps> = ({
-  children,
-  variant = "default",
-  className = "",
-  ...props
-}) => {
-  const variantStyles = {
-    default: "bg-surface border-border",
-    elevated: "bg-surface-secondary border-border shadow-xs",
-    flat: "bg-surface-secondary/50 border-border/70",
-    interactive:
-      "bg-surface border-border hover:border-muted/80 transition-colors cursor-pointer",
-  }[variant];
-
-  return (
-    <HeroCard
-      className={`rounded-lg border p-5 ${variantStyles} ${className}`}
-      {...(props as any)}
-    >
-      {children}
-    </HeroCard>
-  );
-};
-
-export const CardHeader: React.FC<{
+interface SectionCardProps {
   title: React.ReactNode;
   description?: React.ReactNode;
-  action?: React.ReactNode;
+  /** Small leading glyph in the header. Optional — most panels read better without. */
+  icon?: React.ReactNode;
+  actions?: React.ReactNode;
+  children: React.ReactNode;
+  footer?: React.ReactNode;
   className?: string;
-}> = ({ title, description, action, className = "" }) => {
+  contentClassName?: string;
+  /** Render without the header row (title used as aria-label). */
+  bare?: boolean;
+}
+
+/**
+ * The app's panel: a stock HeroUI Card (header · content · footer) with an
+ * optional actions slot beside the title.
+ */
+export const SectionCard: React.FC<SectionCardProps> = ({
+  title,
+  description,
+  icon,
+  actions,
+  children,
+  footer,
+  className,
+  contentClassName,
+  bare = false,
+}) => {
   return (
-    <div className={`flex items-start justify-between gap-4 pb-4 border-b border-border/80 ${className}`}>
-      <div className="space-y-1">
-        <div className="text-xs font-semibold text-foreground tracking-tight flex items-center gap-2">
-          {title}
-        </div>
-        {description && (
-          <p className="text-xs text-muted leading-relaxed max-w-xl">{description}</p>
-        )}
-      </div>
-      {action && <div className="shrink-0">{action}</div>}
-    </div>
+    <Card
+      aria-label={bare && typeof title === "string" ? title : undefined}
+      className={cn("min-w-0", className)}
+    >
+      {!bare && (
+        <Card.Header className="flex-row items-start justify-between gap-3">
+          <div className="flex min-w-0 items-center gap-2">
+            {icon && (
+              <span className="flex shrink-0 text-muted [&_svg]:size-4">
+                {icon}
+              </span>
+            )}
+            <div className="min-w-0">
+              <Card.Title>{title}</Card.Title>
+              {description && (
+                <Card.Description>{description}</Card.Description>
+              )}
+            </div>
+          </div>
+          {actions && (
+            <div className="flex shrink-0 items-center gap-1">{actions}</div>
+          )}
+        </Card.Header>
+      )}
+      <Card.Content className={cn("min-w-0", contentClassName)}>
+        {children}
+      </Card.Content>
+      {footer && <Card.Footer className="gap-2">{footer}</Card.Footer>}
+    </Card>
   );
 };
+
+/** Muted uppercase eyebrow used for in-panel sub-sections. */
+export const SubHeading: React.FC<{
+  children: React.ReactNode;
+  className?: string;
+  action?: React.ReactNode;
+}> = ({ children, className, action }) => (
+  <div className={cn("flex items-center justify-between gap-2", className)}>
+    <span className="text-xs font-medium text-muted">{children}</span>
+    {action}
+  </div>
+);
