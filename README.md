@@ -107,8 +107,8 @@ Desktop API keys use the OS credential store. Legacy plaintext keys are removed
 only after successful migration. Browser preview keys stay in session memory.
 Settings verifies keys through read-only provider requests.
 
-The local queue requires manual dispatch; a saved future timestamp does not
-publish automatically while the app is closed. Live social publishing,
+The local queue posts due items while the app is open. A saved future
+timestamp does not publish while the app is closed. Live social publishing,
 ElevenLabs, and authenticated trends need valid service credentials.
 [The end-to-end and security review](docs/e2e-security-review.md) records tested
 workflows and remaining platform/service verification.

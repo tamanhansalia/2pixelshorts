@@ -1,9 +1,9 @@
 export const STUDIO_STAGES = [
-  { id: "source", label: "Video", title: "Choose your video", description: "Start with a recording on your computer, or find moments from a public video link." },
-  { id: "edit", label: "Edit & format", title: "Make it your own", description: "Choose what to keep, then set the look and framing. Your original file stays intact." },
-  { id: "captions", label: "Captions", title: "Give every word a voice", description: "Choose a caption style, size and position. The sample shows the style; render to see it on your video." },
-  { id: "title", label: "Title & tags", title: "Get ready to share", description: "Review your title, description and tags. These are optional — you can export without them." },
-  { id: "render", label: "Export", title: "Review & export", description: "Check your choices and save the finished video. You can keep working while it renders." },
+  { id: "source", label: "Video", title: "Add a video", description: "Drop a recording, or paste a public YouTube link or a finished Twitch VOD. A live stream waits here until the replay is published." },
+  { id: "edit", label: "Edit", title: "Choose the cut", description: "Clean the recording, or let an installed CLI pick a highlight. Framing and color stay on this computer." },
+  { id: "captions", label: "Captions", title: "Caption every word", description: "Pick a style, size and position. The sample is the style; Export burns it onto your footage." },
+  { id: "title", label: "Title", title: "Name the short", description: "An installed CLI writes the title, description and tags. Auto cut uses that CLI too. You can edit every line." },
+  { id: "render", label: "Export", title: "Export the short", description: "Save the MP4, then schedule it. Due posts go out while 2pixelshorts is open." },
 ] as const;
 
 export type StudioStage = typeof STUDIO_STAGES[number]["id"];

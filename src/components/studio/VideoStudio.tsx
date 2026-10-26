@@ -1714,9 +1714,9 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
     <div className="studio-workspace space-y-5" id="studio-workspace">
       {/* Page header — draft name + file status, primary actions */}
       <PageHeader
-        eyebrow={<span className="inline-flex items-center gap-1.5"><Monitor className="size-3.5" /> Studio · Local rendering</span>}
-        title={fileName || "Create your next short"}
-        description={metadata ? `${formatClipTime(metadata.duration_seconds)} · ${metadata.width} × ${metadata.height} · Draft saved on this computer` : "From your recording to a finished video, one simple step at a time."}
+        eyebrow={<span className="inline-flex items-center gap-1.5"><Monitor className="size-3.5" /> Create · Rendered on this computer</span>}
+        title={fileName || "Long video in. Shorts out."}
+        description={metadata ? `${formatClipTime(metadata.duration_seconds)} · ${metadata.width} × ${metadata.height} · Draft saved on this computer` : "Add a file or a public link. An installed CLI finds the moments, captions burn in locally, and Schedule posts them while the app is open."}
         actions={
           <Button
             variant={metadata ? "secondary" : "primary"}
@@ -1743,6 +1743,16 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
       <div className={`studio-work-area ${metadata ? "studio-work-area--with-preview" : ""}`}>
       <div className="studio-controls min-w-0">
           <section id="studio-source" hidden={activeStage !== "source"} aria-label="Video source" className="studio-panel space-y-5">
+              {!inputPath && !streamUrl.trim() && (
+                <ol className="grid gap-2 text-sm text-muted sm:grid-cols-4">
+                  {["Add a file or link", "Find the moments", "Caption and export", "Schedule the posts"].map((step, index) => (
+                    <li key={step} className="rounded-xl border border-separator bg-surface px-3 py-2">
+                      <span className="mr-2 font-medium text-foreground">{index + 1}</span>
+                      {step}
+                    </li>
+                  ))}
+                </ol>
+              )}
               {/* Two ways in, side by side at equal height. */}
               <div className="studio-source-options grid grid-cols-1 gap-5">
               <SectionCard
@@ -1881,7 +1891,7 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
 
               <SectionCard
                 title="From a stream"
-                description="Paste a YouTube or Twitch VOD — the best moments become shorts"
+                description="Public YouTube link or finished Twitch VOD. A live stream waits until the replay exists."
                 contentClassName="flex flex-col"
               >
                 <div className="flex flex-1 flex-col gap-3">

@@ -10,6 +10,7 @@ import {
   buildSeoPatch,
   canPostItem,
   clearCompletedItems,
+  dueDispatchIds,
   findQueueItemByVideoPath,
   formatScheduledLabel,
   markDispatched,
@@ -468,6 +469,10 @@ export function App() {
     }
     return [];
   });
+  const queueRef = useRef(queue);
+  queueRef.current = queue;
+  const zernioKeyRef = useRef(zernioKey);
+  zernioKeyRef.current = zernioKey;
 
   // Published-post metrics: the SEO feedback loop (winning titles steer
   // every new analysis; see lib/performance).
@@ -984,7 +989,7 @@ export function App() {
     setQueue((prev) => [entry, ...prev]);
     triggerToast(
       "Short queued",
-      `Releases ${formatScheduledLabel(entry.scheduled_for)} — post it anytime from Queue`,
+      `Releases ${formatScheduledLabel(entry.scheduled_for)} — it posts while 2pixelshorts is open`,
       "success",
     );
     return entry;
@@ -1108,9 +1113,9 @@ export function App() {
     setPublishedSchedule({});
   };
 
-  // Post a queued short now (Queue page action).
+  // Post a queued short now (Queue page action, and the open-app timer).
   const handleDispatchJob = async (id: string) => {
-    const item = queue.find((q) => q.id === id);
+    const item = queueRef.current.find((q) => q.id === id);
     if (!item) return;
     const blocked = canPostItem(item, zernioKey);
     if (blocked) {
@@ -1177,6 +1182,35 @@ export function App() {
       setGlobalTask({ type: "idle" });
     }
   };
+
+  // While this window is open, send posts whose release time has passed.
+  // Closing the app pauses the queue; nothing is sent in the background.
+  const dispatchRef = useRef(handleDispatchJob);
+  dispatchRef.current = handleDispatchJob;
+  useEffect(() => {
+    let stopped = false;
+    const inFlight = new Set<string>();
+    const tick = async () => {
+      const ids = dueDispatchIds(queueRef.current, zernioKeyRef.current);
+      for (const id of ids) {
+        if (stopped || inFlight.has(id)) continue;
+        inFlight.add(id);
+        try {
+          await dispatchRef.current(id);
+        } finally {
+          inFlight.delete(id);
+        }
+      }
+    };
+    void tick();
+    const timer = window.setInterval(() => {
+      void tick();
+    }, 30_000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, []);
 
   // In-place queue edit (title, SEO, channels, release slot) from the
   // Queue page. Optional patch fields never clobber: an omitted

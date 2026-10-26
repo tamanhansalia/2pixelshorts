@@ -131,10 +131,9 @@ YouTube trends need dedicated test credentials and destinations. Existing
 contract/unit tests do not prove those services work with a real account today.
 No production post, credential reset, or private-media upload was performed.
 
-The queue currently requires manual dispatch. A future timestamp in local queue
-storage does not itself implement automatic publishing while the app is closed.
-Automatic scheduling should be treated as a separate feature, not inferred from
-the queue UI or the aspirational project specification.
+Due queue items dispatch while the app is open. A future timestamp in local
+queue storage does not publish while the app is closed. Closed-app scheduling
+is not implied by the queue UI.
 
 Windows/Linux runtime behavior, Windows process-tree cancellation, native
 credential stores outside macOS, and live non-Claude editing agents were not

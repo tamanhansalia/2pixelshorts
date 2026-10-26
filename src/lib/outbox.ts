@@ -489,3 +489,32 @@ export function isQueueItemOverdue(
   const t = new Date(item.scheduled_for).getTime();
   return !Number.isNaN(t) && t < now;
 }
+
+/**
+ * Queued posts whose release time has passed and that can actually be
+ * sent (key present, at least one channel). Oldest slot first. The input
+ * array is never mutated. Nothing is due while the app is closed — the
+ * caller runs this on a timer only while the window is open.
+ */
+export function dueDispatchIds(
+  items: Pick<
+    ScheduleItem,
+    "id" | "status" | "scheduled_for" | "platforms"
+  >[],
+  apiKey: string,
+  now: number = Date.now(),
+): string[] {
+  if (!apiKey.trim()) return [];
+  return items
+    .filter(
+      (item) =>
+        isQueueItemOverdue(item, now) && canPostItem(item, apiKey) === null,
+    )
+    .slice()
+    .sort(
+      (a, b) =>
+        new Date(a.scheduled_for).getTime() -
+        new Date(b.scheduled_for).getTime(),
+    )
+    .map((item) => item.id);
+}

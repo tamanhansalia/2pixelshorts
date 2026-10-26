@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   buildQuickSchedulePayload,
   clearCompletedItems,
+  dueDispatchIds,
   filterQueueItems,
   findQueueItemByVideoPath,
   formatRelease,
@@ -251,6 +252,38 @@ describe("isQueueItemOverdue", () => {
     assert.equal(
       isQueueItemOverdue({ status: "queued", scheduled_for: "garbage" }, now),
       false,
+    );
+  });
+});
+
+describe("dueDispatchIds", () => {
+  const now = new Date("2026-10-11T12:00:00Z").getTime();
+  const row = (
+    id: string,
+    scheduled_for: string,
+    status: "queued" | "publishing" | "failed" = "queued",
+    platforms: string[] = ["youtube"],
+  ) => ({ id, status, scheduled_for, platforms });
+
+  it("returns overdue posts that have a key and a channel, oldest first", () => {
+    const ids = dueDispatchIds(
+      [
+        row("later", "2026-10-11T11:00:00Z"),
+        row("earlier", "2026-10-10T09:00:00Z"),
+        row("future", "2026-10-12T09:00:00Z"),
+        row("busy", "2026-10-09T09:00:00Z", "publishing"),
+        row("nowhere", "2026-10-09T09:00:00Z", "queued", []),
+      ],
+      "key",
+      now,
+    );
+    assert.deepEqual(ids, ["earlier", "later"]);
+  });
+
+  it("posts nothing without a Zernio key", () => {
+    assert.deepEqual(
+      dueDispatchIds([row("a", "2026-10-10T09:00:00Z")], "  ", now),
+      [],
     );
   });
 });

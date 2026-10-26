@@ -345,9 +345,10 @@ export const ScheduleQueue: React.FC<ScheduleQueueProps> = ({
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Queue"
+        title="Schedule"
         description={
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+          <span>Due posts go out while this app is open.</span>
           <span>
             <span className="font-medium text-foreground">{queue.length}</span>{" "}
             post{queue.length === 1 ? "" : "s"}
