@@ -1,0 +1,4 @@
+# Dev-only: on macOS, run built binaries through the signing script so the
+# Keychain stops re-prompting after rebuilds. See scripts/dev-sign-run.sh.
+[target.'cfg(target_os = "macos")']
+runner = ["sh", "../scripts/dev-sign-run.sh"]

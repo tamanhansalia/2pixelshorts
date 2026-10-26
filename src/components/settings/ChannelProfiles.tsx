@@ -4,7 +4,9 @@ import { Button } from "../ui/Button";
 import { Badge } from "../ui/Badge";
 import { SectionCard } from "../ui/Card";
 import { Field, TextArea, TextInput } from "../ui/Field";
+import { ListBox, Select } from "@heroui/react";
 import type { ChannelProfile } from "../../lib/channelProfiles";
+import { YOUTUBE_CATEGORIES } from "../../lib/publishExtras";
 
 interface ChannelProfilesProps {
   profiles: ChannelProfile[];
@@ -265,6 +267,39 @@ export const ChannelProfiles: React.FC<ChannelProfilesProps> = ({
               placeholder="e.g. ai tools, rust, saas"
               aria-label="Channel keywords"
             />
+          </Field>
+          <Field
+            label="YouTube category"
+            hint="Sent with every YouTube upload; helps YouTube place the short"
+          >
+            <Select
+              variant="secondary"
+              fullWidth
+              selectedKey={draft.youtubeCategory ?? "none"}
+              onSelectionChange={(key) =>
+                set({
+                  youtubeCategory:
+                    String(key) === "none" ? undefined : String(key),
+                })
+              }
+              aria-label="YouTube category"
+            >
+              <Select.Trigger>
+                <Select.Value />
+                <Select.Indicator />
+              </Select.Trigger>
+              <Select.Popover>
+                <ListBox>
+                  {[{ id: "none", label: "YouTube default" }, ...YOUTUBE_CATEGORIES].map(
+                    (opt) => (
+                      <ListBox.Item key={opt.id} id={opt.id} textValue={opt.label}>
+                        {opt.label}
+                      </ListBox.Item>
+                    ),
+                  )}
+                </ListBox>
+              </Select.Popover>
+            </Select>
           </Field>
         </div>
       </SectionCard>

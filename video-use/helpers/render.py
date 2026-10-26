@@ -632,15 +632,18 @@ def _stack_tail(stacked, color_vf, srt_path=None, subtitle_style=None,
 def probe_media(path):
     """Return {duration, width, height, has_audio} via ffprobe."""
     _which_or_raise("ffprobe")
-    proc = subprocess.run(
-        [
-            "ffprobe", "-v", "error",
-            "-show_entries", "stream=width,height,codec_type",
-            "-show_entries", "format=duration",
-            "-of", "json", path,
-        ],
-        capture_output=True, text=True, timeout=60,
-    )
+    try:
+        proc = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "stream=width,height,codec_type",
+                "-show_entries", "format=duration",
+                "-of", "json", path,
+            ],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RenderError(f"could not probe {path}: {exc}") from exc
     if proc.returncode != 0:
         raise RenderError(f"ffprobe failed for {path}: {proc.stderr.strip()}")
     try:
@@ -720,6 +723,12 @@ def _escape_subtitles_path(path):
 # next word in its cue begins, with a short trailing hold clipped at the
 # next cue — speech gaps never blink the line out and cues never overlap.
 #
+# Captions burn fully opaque. Inactive words keep the same size and 100%
+# alpha as the spoken word (color is the only highlight). Drop shadows use
+# opaque black rather than &H80… (50% faded). The subtitles filter
+# composites in RGB (gbrp) because libass over yuv420p washes glyphs to
+# ~50% gray, which read as a fade-in on the output.
+#
 # The 9:16 monitor preview scales proportionally at any width via container
 # query units: FontSize px / 1080 as cqw (standard 50px -> 4.63cqw),
 # MarginV px / 1920 as % of height (top 140 -> 7.3%, bottom 200 -> 10.4%),
@@ -758,26 +767,27 @@ def _ass_color(hex_rgb, alpha=0):
 # preview's plain-word vs spoken-word colors. `active_tags` are ASS override
 # tags applied to the currently spoken word only (pill/glow/underline/skew
 # approximations — libass cannot draw rounded CSS pills or 3D extrusion).
+# Highlight tags change color/weight only: no scale override (size jump) and
+# no per-word alpha (fade on entrance).
 _SUBTITLE_THEMES = {
     "pop": {"font": "Arial", "base": 50,
             "inactive": "#FFFFFF", "active": "#FFE500",
             "bold": -1, "italic": 0, "border": 1,
             "outline": "#000000", "back": "#000000",
             "outline_px": 4, "shadow": 2, "blur": 0,
-            "active_tags": r"{\1c&H0000E5FF&\fscx112\fscy112}"},
+            "active_tags": r"{\1c&H0000E5FF&}"},
     "spotlight": {"font": "Arial", "base": 50,
                   "inactive": "#FFFFFF", "active": "#FFFFFF",
                   "bold": -1, "italic": 0, "border": 1,
                   "outline": "#000000", "back": "#000000",
                   "outline_px": 2, "shadow": 1, "blur": 0,
-                  "active_tags": r"{\3c&H00ED3A7C&\bord5\shad0\fscx105\fscy105}"},
+                  "active_tags": r"{\3c&H00ED3A7C&\bord5\shad0}"},
     "glow": {"font": "Arial", "base": 50,
-             "inactive": "#FFFFFF", "inactive_alpha": 0x66,
-             "active": "#00F5FF",
+             "inactive": "#FFFFFF", "active": "#00F5FF",
              "bold": -1, "italic": 0, "border": 1,
              "outline": "#00323A", "back": "#000000",
              "outline_px": 2, "shadow": 0, "blur": 2,
-             "active_tags": r"{\1c&H00FFF500&\bord3\blur2\fscx105\fscy105}"},
+             "active_tags": r"{\1c&H00FFF500&\bord3\blur2}"},
     "boxed": {"font": "Arial", "base": 50,
               "inactive": "#F5F5F4", "active": "#FACC15",
               "bold": -1, "italic": 0, "border": 3,
@@ -795,7 +805,7 @@ _SUBTITLE_THEMES = {
              "bold": -1, "italic": 0, "border": 1,
              "outline": "#000000", "back": "#000000",
              "outline_px": 3, "shadow": 2, "blur": 0,
-             "active_tags": r"{\1c&H005EC522&\i1\fscx112\fscy112}"},
+             "active_tags": r"{\1c&H005EC522&\i1}"},
     "punch": {"font": "Arial", "base": 104,
               "inactive": "#FFFFFF", "active": "#FFFFFF",
               "bold": -1, "italic": 0, "border": 1,
@@ -900,10 +910,9 @@ def subtitle_force_style(style_id=None, position=None, size=None):
         (position or "").strip().lower(), (2, 200),
     )
     font_size = _font_size_for(style_id, size)
-    primary = _ass_color(theme["inactive"],
-                         theme.get("inactive_alpha", 0))
-    outline = _ass_color(theme["outline"], 0x80 if theme["border"] == 1 and theme["outline_px"] <= 1 else 0)
-    back = _ass_color(theme["back"], 0) if theme["border"] == 3 else "&H80000000"
+    primary = _ass_color(theme["inactive"], 0)
+    outline = _ass_color(theme["outline"], 0)
+    back = _ass_color(theme["back"], 0)
     return (
         f"FontName={theme['font']},FontSize={font_size},"
         f"PrimaryColour={primary},OutlineColour={outline},"
@@ -921,12 +930,10 @@ def subtitle_ass_style_line(style_id=None, position=None, size=None):
         (position or "").strip().lower(), (2, 200),
     )
     font_size = _font_size_for(style_id, size)
-    primary = _ass_color(theme["inactive"],
-                         theme.get("inactive_alpha", 0))
-    secondary = _ass_color(theme["inactive"],
-                           theme.get("inactive_alpha", 0))
-    outline = _ass_color(theme["outline"])
-    back = _ass_color(theme["back"], 0 if theme["border"] == 3 else 0x80)
+    primary = _ass_color(theme["inactive"], 0)
+    secondary = _ass_color(theme["inactive"], 0)
+    outline = _ass_color(theme["outline"], 0)
+    back = _ass_color(theme["back"], 0)
     underline = -1 if theme.get("underline") else 0
     return (
         f"Style: Caption,{theme['font']},{font_size},"
@@ -1043,13 +1050,20 @@ def words_to_ass(words, case="uppercase", style_id=None, position=None,
 
 
 def _subtitles_filter(sub_path, style_id=None, position=None, size=None):
-    """Build the `subtitles=` video-filter chunk for an .ass or .srt file."""
+    """Build the `subtitles=` video-filter chunk for an .ass or .srt file.
+
+    Glyphs composite in RGB (gbrp) then convert back to yuv420p. Burning
+    directly onto yuv420p lets libass alpha-blend in subsampled chroma,
+    which makes white captions look ~50% transparent.
+    """
     escaped = _escape_subtitles_path(sub_path)
     if sub_path.lower().endswith(".ass"):
         # The .ass document carries PlayRes-pinned styles already.
-        return f",subtitles={escaped}"
-    force_style = subtitle_force_style(style_id, position, size)
-    return f",subtitles={escaped}:force_style='{force_style}'"
+        burn = f"subtitles={escaped}"
+    else:
+        force_style = subtitle_force_style(style_id, position, size)
+        burn = f"subtitles={escaped}:force_style='{force_style}'"
+    return f",format=gbrp,{burn},format=yuv420p"
 
 
 def build_ffmpeg_args(
@@ -1225,7 +1239,16 @@ def _render_framed(input_path, output_path, segments, preset_id, info,
         args[-1:-1] = ["-t", f"{expected:.6f}"]
         log(f"[STAGE 4/4] {aspect} adaptive framing, {preset_id} grade" +
             (" & subtitles burned" if srt_path else " & clean video"))
-        proc = subprocess.run(["ffmpeg"] + args, capture_output=True, text=True, timeout=3600)
+        # FFmpeg can truncate logged metadata in the middle of a UTF-8
+        # character, even on a successful encode. Logs must not prevent
+        # checking its exit status and validating the actual output video.
+        try:
+            proc = subprocess.run(
+                ["ffmpeg"] + args, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=3600,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise RenderError(f"ffmpeg framed render could not complete: {exc}") from exc
         if proc.returncode:
             raise RenderError(f"ffmpeg framed render failed: {proc.stderr.strip()[-2000:]}")
     if not os.path.isfile(output_path):

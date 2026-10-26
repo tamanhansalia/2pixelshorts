@@ -16,12 +16,14 @@ import {
   resolveSourceStatus,
   selectSource,
   latestCompletedOutput,
+  preferredSeoAgent,
   shouldAutoNameOutput,
   slugifyTitle,
+  sourceLabel,
   streamClipSourceName,
-  STUDIO_METADATA_STEP,
   suggestOutputPath,
   upsertDraft,
+  importClipDrafts,
   type SourceEntry,
   type StudioProjectDraft,
 } from "./studioProjects.ts";
@@ -133,7 +135,6 @@ function draft(over: Partial<StudioProjectDraft> = {}): StudioProjectDraft {
     seoDescription: "Desc",
     seoTags: ["shorts"],
     reviewReport: null,
-    activeStep: 0,
     updatedAt: new Date().toISOString(),
     createdAt: new Date().toISOString(),
     ...over,
@@ -141,6 +142,30 @@ function draft(over: Partial<StudioProjectDraft> = {}): StudioProjectDraft {
 }
 
 describe("studio projects", () => {
+  it("imports clip downloads as sidebar sources in finder order", () => {
+    const meta = {
+      file_path: "/clips/a_clip1.mp4",
+      duration_seconds: 32,
+      width: 1080,
+      height: 1920,
+      fps: 30,
+      codec: "h264",
+      audio_channels: 2,
+      file_size_bytes: 10,
+    };
+    const next = importClipDrafts(emptyStudioStore(), [
+      { inputPath: "/clips/a_clip1.mp4", metadata: meta, title: "Technical breakdown" },
+      { inputPath: "/clips/a_clip2.mp4", metadata: null, title: "Fast-paced showcase" },
+    ], "2026-10-20T12:00:00.000Z");
+    assert.deepEqual(next.recent, ["/clips/a_clip1.mp4", "/clips/a_clip2.mp4"]);
+    assert.equal(next.currentId, "/clips/a_clip1.mp4");
+    assert.equal(next.projects["/clips/a_clip1.mp4"].seoTitle, "Technical breakdown");
+    assert.equal(next.projects["/clips/a_clip1.mp4"].studioStage, "edit");
+    assert.equal(next.projects["/clips/a_clip2.mp4"].studioStage, "source");
+    const untouched = emptyStudioStore();
+    assert.equal(importClipDrafts(untouched, []), untouched);
+  });
+
   it("upserts drafts most-recent-first", () => {
     let store = emptyStudioStore();
     store = upsertDraft(store, draft({ inputPath: "a.mp4" }));
@@ -167,11 +192,11 @@ describe("studio projects", () => {
     assert.equal(d.seoTitle, "");
     assert.deepEqual(d.seoTags, []);
     assert.equal(d.reviewReport, null);
-    assert.equal(d.activeStep, 0);
+    assert.equal("activeStep" in d, false);
     assert.equal(d.burnInCaptions, true);
   });
 
-  it("prefills a draft from a queue item on the metadata step", () => {
+  it("prefills a draft from a queue item without a step", () => {
     const d = buildDraftFromQueue({
       video_path: "out.mp4",
       title: "Queued title",
@@ -182,7 +207,7 @@ describe("studio projects", () => {
     assert.equal(d.seoTitle, "Queued title");
     assert.equal(d.seoDescription, "Queued desc");
     assert.deepEqual(d.seoTags, ["ai"]);
-    assert.equal(d.activeStep, STUDIO_METADATA_STEP);
+    assert.equal("activeStep" in d, false);
   });
 
   it("merges recents with queued paths without duplicates", () => {
@@ -304,6 +329,62 @@ describe("studio projects", () => {
     assert.equal(entries[0].status, "queued");
   });
 
+  it("labels sidebar shorts with the SEO title", () => {
+    assert.equal(
+      sourceLabel({ seoTitle: "  Stop Doing This  ", fallbackPath: "clip_short.mp4" }),
+      "Stop Doing This",
+    );
+    assert.equal(
+      sourceLabel({ seoTitle: "   ", queueTitle: "Queued hook", fallbackPath: "out.mp4" }),
+      "Queued hook",
+    );
+    assert.equal(
+      sourceLabel({ historyTitle: "From render", fallbackPath: "a_short.mp4" }),
+      "From render",
+    );
+    assert.equal(sourceLabel({ fallbackPath: "C:\\v\\raw.mp4" }), "raw.mp4");
+
+    const titled = upsertDraft(
+      emptyStudioStore(),
+      draft({ inputPath: "a.mp4", outputPath: "a_short.mp4", seoTitle: "The Secret Workflow" }),
+    );
+    const titledEntries = buildSourceEntries(titled.recent, titled.projects, [], []);
+    assert.equal(titledEntries[0]?.label, "The Secret Workflow");
+
+    const untitled = upsertDraft(
+      emptyStudioStore(),
+      draft({ inputPath: "clip.mp4", outputPath: "clip_short.mp4", seoTitle: "  " }),
+    );
+    const untitledEntries = buildSourceEntries(untitled.recent, untitled.projects, [], []);
+    assert.equal(untitledEntries[0]?.label, "clip_short.mp4");
+
+    const fromHistory = upsertDraft(
+      emptyStudioStore(),
+      draft({ inputPath: "a.mp4", outputPath: "a_short.mp4", seoTitle: "" }),
+    );
+    const historyEntries = buildSourceEntries(
+      fromHistory.recent,
+      fromHistory.projects,
+      [
+        {
+          inputVideo: "a.mp4",
+          outputVideo: "a_short.mp4",
+          status: "completed",
+          progress: 1,
+          createdAt: "2026-10-06T09:00:00.000Z",
+          seo: { title: "From render", description: "", tags: [] },
+        },
+      ],
+      [],
+    );
+    assert.equal(historyEntries[0]?.label, "From render");
+
+    const queued = buildSourceEntries([], {}, [], [
+      { video_path: "out.mp4", created_at: "2026-10-06T10:00:00.000Z", title: "Queued hook" },
+    ]);
+    assert.equal(queued[0]?.label, "Queued hook");
+  });
+
   it("resolves merged status from the newest history touch", () => {
     const history = [
       { inputVideo: "a.mp4", outputVideo: "a_short.mp4", status: "running" as const, progress: 0.4 },
@@ -410,5 +491,26 @@ describe("applyStudioSeo", () => {
     assert.deepEqual(draft.seoTitleAlternatives, []);
     assert.deepEqual(draft.seoHashtags, []);
     assert.equal(draft.seoScore, null);
+  });
+
+  it("stores an empty demand list instead of the spoken phrases", () => {
+    const next = applyStudioSeo(store(), "C:\\videos\\a.mp4", {
+      ...meta,
+      search_queries: ["open sir"],
+      demand_queries: [],
+    });
+    const saved = next.projects["C:\\videos\\a.mp4"];
+    assert.deepEqual(saved.seoSearchQueries, ["open sir"]);
+    assert.deepEqual(saved.seoDemandQueries, []);
+  });
+});
+
+describe("preferred SEO agent", () => {
+  it("uses the newest real CLI and skips Auto cut", () => {
+    assert.equal(preferredSeoAgent(emptyStudioStore()), "claude");
+    let store = emptyStudioStore();
+    store = upsertDraft(store, draft({ inputPath: "a.mp4", agentId: "auto", updatedAt: "2026-10-01T00:00:00.000Z" }));
+    store = upsertDraft(store, draft({ inputPath: "b.mp4", agentId: "codex", updatedAt: "2026-10-02T00:00:00.000Z" }));
+    assert.equal(preferredSeoAgent(store), "codex");
   });
 });

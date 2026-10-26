@@ -89,7 +89,7 @@ pub async fn probe_video_metadata(file_path: &str) -> Result<VideoMetadata, Stri
     let mut height = 1920;
     let mut fps = 30.0;
     let mut codec = "unknown".to_string();
-    let mut audio_channels = 2;
+    let mut audio_channels = 0;
 
     if let Some(streams) = json_val.get("streams").and_then(|s| s.as_array()) {
         for s in streams {

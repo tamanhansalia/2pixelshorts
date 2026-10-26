@@ -1,4 +1,6 @@
 import type { JobStatus, VideoMetadata, VideoReviewReport } from "../types/index.ts";
+import { normalizeEditStrategy, type EditStrategy } from "./studioAutomation.ts";
+import { resolveStudioStage, type StudioStage } from "./studioWorkflow.ts";
 import type { RenderHistoryEntry } from "./renderHistory.ts";
 import { isActiveRenderStatus } from "./renderHistory.ts";
 
@@ -6,15 +8,14 @@ import { isActiveRenderStatus } from "./renderHistory.ts";
  * Studio sources (projects): every imported video keeps its edit state and
  * SEO metadata, so leaving the Studio tab never loses work and the sidebar
  * can list each source with its status. Clicking a source reopens Studio
- * on its Metadata (SEO) step with Render one step away.
+ * at the saved stage, with the same edit and publishing choices.
  */
-
-export const STUDIO_METADATA_STEP = 3;
-export const STUDIO_RENDER_STEP = 4;
 
 export interface StudioProjectDraft {
   inputPath: string;
   aspectRatio?: string;
+  studioStage?: StudioStage;
+  layout?: string;
   outputPath: string;
   /** True once the user edits the output name by hand. Untouched drafts
    * auto-derive the name (Shorts title → stream title → input file). */
@@ -22,6 +23,10 @@ export interface StudioProjectDraft {
   metadata: VideoMetadata | null;
   presetId: string;
   agentId: string;
+  editStrategy?: EditStrategy;
+  removeSilence?: boolean;
+  removeRetakes?: boolean;
+  highlightTarget?: number;
   /** Legacy manual-trim fields; Studio no longer reads or writes them. */
   cutStartInput?: string;
   cutEndInput?: string;
@@ -31,6 +36,8 @@ export interface StudioProjectDraft {
   subtitleSize: string;
   subtitleCase: string;
   promptHook: string;
+  customInstructionsEnabled?: boolean;
+  modelId?: string;
   contextOverride: string;
   seoTitle: string;
   seoDescription: string;
@@ -41,8 +48,15 @@ export interface StudioProjectDraft {
   seoScore?: number | null;
   seoQualityScore?: number | null;
   seoKeywords?: string[];
+  /** The searches this short should win, and its pinned first comment. */
+  seoSearchQueries?: string[];
+  /**
+   * External searches only. An empty array means the engine composed
+   * the phrases from speech. Missing means an older package.
+   */
+  seoDemandQueries?: string[];
+  seoPinnedComment?: string;
   reviewReport: VideoReviewReport | null;
-  activeStep: number;
   updatedAt: string;
   /** Set once when the short is started; drives sidebar day grouping. Never rewritten by edits. */
   createdAt: string;
@@ -151,6 +165,10 @@ export function blankStudioDraft(): StudioProjectDraft {
     metadata: null,
     presetId: "warm_cinematic",
     agentId: "claude",
+    editStrategy: "cleanup",
+    removeSilence: true,
+    removeRetakes: true,
+    highlightTarget: 30,
     cutStartInput: "",
     cutEndInput: "",
     burnInCaptions: true,
@@ -164,10 +182,44 @@ export function blankStudioDraft(): StudioProjectDraft {
     seoDescription: "",
     seoTags: [],
     reviewReport: null,
-    activeStep: 0,
     updatedAt: new Date().toISOString(),
     createdAt: new Date().toISOString(),
   };
+}
+
+/** Downloaded stream windows ready to become sidebar sources. */
+export interface ImportedClipSource {
+  inputPath: string;
+  metadata: VideoMetadata | null;
+  title?: string;
+}
+
+/** Insert selected clip downloads as fresh Studio drafts.
+ *
+ * First clip in `clips` becomes current (opens in Studio). Reverse upsert
+ * so the sidebar keeps clip-finder order, most-recent-first. */
+export function importClipDrafts(
+  store: StudioStore,
+  clips: ImportedClipSource[],
+  now = new Date().toISOString(),
+): StudioStore {
+  const valid = clips.filter((clip) => clip.inputPath.trim());
+  if (valid.length === 0) return store;
+  let next = store;
+  for (const clip of [...valid].reverse()) {
+    const title = (clip.title || "").trim();
+    const draft: StudioProjectDraft = {
+      ...blankStudioDraft(),
+      inputPath: clip.inputPath,
+      metadata: clip.metadata,
+      seoTitle: title,
+      studioStage: clip.metadata ? "edit" : "source",
+      updatedAt: now,
+      createdAt: now,
+    };
+    next = upsertDraft(next, draft);
+  }
+  return { ...next, currentId: valid[0].inputPath };
 }
 
 /** Insert or replace a draft and move its path to the front of recents. */
@@ -219,6 +271,10 @@ export function buildDraftFromQueue(item: {
     metadata: null,
     presetId: "warm_cinematic",
     agentId: "claude",
+    editStrategy: "cleanup",
+    removeSilence: true,
+    removeRetakes: true,
+    highlightTarget: 30,
     cutStartInput: "",
     cutEndInput: "",
     burnInCaptions: true,
@@ -232,7 +288,6 @@ export function buildDraftFromQueue(item: {
     seoDescription: item.description || "",
     seoTags: item.tags ? [...item.tags] : [],
     reviewReport: null,
-    activeStep: STUDIO_METADATA_STEP,
     updatedAt: new Date().toISOString(),
     createdAt: new Date().toISOString(),
   };
@@ -256,6 +311,9 @@ export function applyStudioSeo(
     seo_score?: number | null;
     quality_score?: number | null;
     keywords_analyzed?: string[];
+    search_queries?: string[];
+    demand_queries?: string[];
+    pinned_comment?: string;
     review_report?: VideoReviewReport | null;
   },
 ): StudioStore {
@@ -286,6 +344,11 @@ export function applyStudioSeo(
         seoKeywords: meta.keywords_analyzed
           ? [...meta.keywords_analyzed]
           : [],
+        seoSearchQueries: meta.search_queries ? [...meta.search_queries] : [],
+        seoDemandQueries: Array.isArray(meta.demand_queries)
+          ? [...meta.demand_queries]
+          : draft.seoDemandQueries,
+        seoPinnedComment: meta.pinned_comment ?? "",
         reviewReport: meta.review_report ?? draft.reviewReport,
         updatedAt: new Date().toISOString(),
       },
@@ -345,6 +408,7 @@ export function resolveSourceStatus(
 export interface SourceEntry {
   /** Stable row key: the studio input path, or the queue path when sourceless. */
   id: string;
+  /** Sidebar name: SEO title when present, otherwise the file name. */
   label: string;
   createdAt: string;
   status: SourceStatus;
@@ -360,12 +424,61 @@ export interface SourceEntry {
 export interface QueueRef {
   video_path: string;
   created_at: string;
+  /** Queue SEO title, used for sourceless rows. */
+  title?: string;
 }
 
 type HistoryRef = Pick<
   RenderHistoryEntry,
-  "inputVideo" | "outputVideo" | "status" | "progress" | "createdAt"
+  "inputVideo" | "outputVideo" | "status" | "progress" | "createdAt" | "seo"
 >;
+
+/**
+ * Sidebar short name: the Title & tags SEO title wins, then a queued
+ * title, then the title captured on the newest matching render, then
+ * the file name. Trim-empty strings fall through.
+ */
+/**
+ * Agent CLI Title & tags should use, independent of edit mode.
+ * Newest draft with a real CLI wins; otherwise Claude (engine falls back
+ * to composed Auto-cut titles when that CLI is missing).
+ */
+export function preferredSeoAgent(
+  store: StudioStore,
+  fallback = "claude",
+): string | undefined {
+  const rows = Object.values(store.projects)
+    .filter((draft) => draft.agentId && draft.agentId !== "auto")
+    .sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""));
+  const id = rows[0]?.agentId || fallback;
+  return !id || id === "auto" ? undefined : id;
+}
+
+export function sourceLabel(opts: {
+  seoTitle?: string;
+  queueTitle?: string;
+  historyTitle?: string;
+  fallbackPath: string;
+}): string {
+  const seo = opts.seoTitle?.trim();
+  if (seo) return seo;
+  const queued = opts.queueTitle?.trim();
+  if (queued) return queued;
+  const hist = opts.historyTitle?.trim();
+  if (hist) return hist;
+  return baseName(opts.fallbackPath);
+}
+
+function historyTitleFor(files: string[], history: HistoryRef[]): string {
+  for (const h of history) {
+    const title = h.seo?.title?.trim();
+    if (!title) continue;
+    if (files.includes(h.inputVideo) || files.includes(h.outputVideo)) {
+      return title;
+    }
+  }
+  return "";
+}
 
 /**
  * The file actually on disk for this input: the newest *completed* render's
@@ -461,7 +574,11 @@ export function buildSourceEntries(
     const resolved = resolveEntryStatus(files, history, queuePaths);
     entries.push({
       id,
-      label: baseName(linked ?? draft?.outputPath ?? draft?.inputPath ?? id),
+      label: sourceLabel({
+        seoTitle: draft?.seoTitle,
+        historyTitle: historyTitleFor(files, history),
+        fallbackPath: linked ?? draft?.outputPath ?? draft?.inputPath ?? id,
+      }),
       createdAt:
         draft?.createdAt ?? historyCreatedFor(files, history) ?? new Date().toISOString(),
       status: resolved.status,
@@ -480,7 +597,11 @@ export function buildSourceEntries(
     const resolved = resolveEntryStatus([q.video_path], history, queuePaths);
     entries.push({
       id: q.video_path,
-      label: baseName(q.video_path),
+      label: sourceLabel({
+        queueTitle: q.title,
+        historyTitle: historyTitleFor([q.video_path], history),
+        fallbackPath: q.video_path,
+      }),
       createdAt: q.created_at,
       status: resolved.status,
       progress: resolved.progress,
@@ -571,6 +692,14 @@ export function normalizeStudioStore(store: StudioStore): StudioStore {
     projects[id] = {
       ...(draft as StudioProjectDraft),
       outputPath,
+      editStrategy: normalizeEditStrategy(draft.editStrategy ?? (draft.promptHook?.trim() ? "custom" : undefined)),
+      promptHook: draft.promptHook ?? "",
+      customInstructionsEnabled: draft.customInstructionsEnabled ?? (draft.editStrategy === "custom" || (!draft.editStrategy && Boolean(draft.promptHook?.trim()))),
+      modelId: draft.modelId ?? "",
+      studioStage: resolveStudioStage(draft.studioStage, Boolean(draft.metadata)),
+      removeSilence: draft.removeSilence ?? true,
+      removeRetakes: draft.removeRetakes ?? true,
+      highlightTarget: [30, 60, 90].includes(draft.highlightTarget ?? 0) ? draft.highlightTarget : 30,
       outputTouched:
         draft.outputTouched ??
         (outputPath.trim() !== "" && outputPath !== "final_short.mp4"),

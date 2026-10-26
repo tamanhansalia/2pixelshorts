@@ -2,15 +2,15 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
   AlertCircle,
-  Captions,
   Check,
   CheckCircle2,
   ChevronRight,
+  ChevronLeft,
+  Monitor,
   Copy,
   ExternalLink,
   Film,
   FolderOpen,
-  Layers,
   Link2,
   Play,
   Search,
@@ -27,12 +27,12 @@ import {
   X,
 } from "lucide-react";
 import {
-  Alert,
   Label,
   ListBox,
   SearchField,
   Select,
   Spinner,
+  Switch,
   Tag as HeroTag,
   TagGroup,
 } from "@heroui/react";
@@ -45,7 +45,9 @@ import {
   VideoReviewReport,
 } from "../../types";
 import { fetchTrending, isTauri, reviewRender } from "../../lib/ipc";
+import { automationParams, nextAutomaticExport, normalizeEditStrategy, type EditStrategy } from "../../lib/studioAutomation";
 import type { StudioSeoJob } from "../../lib/seoJobs";
+import { isBusyClipJob, type StreamAnalysisJobs } from "../../lib/streamAnalysis";
 import {
   LEGACY_DEFAULT,
   getDefaultProfile,
@@ -57,20 +59,21 @@ import {
   needsAgentProbe,
   probeAgent,
   renderWarningsFor,
+  seoAgentForPackage,
 } from "../../lib/jobs";
 import {
-  blankStreamRun,
   getStreamRun,
+  isWatchableLiveRun,
   mostRecentUsableRun,
-  removeStreamRun,
-  upsertStreamRun,
   type StreamRun,
   type StreamRunStore,
 } from "../../lib/streamRuns";
 import {
   STREAM_ASPECT_RATIOS,
   STREAM_LAYOUTS,
+  clipWorkPath,
   dirPrefixOf,
+  downloadStreamClipsAsSources,
   effectiveLayoutForAspect,
   fetchStreamClip,
   formatClipRange,
@@ -79,14 +82,12 @@ import {
   isYoutubeUrl,
   needsNineSixteenCanvas,
   parseAspectRatio,
-  probeStream,
-  reviewModelOption,
+  resolvedClipOutput,
   streamSuggestOptions,
-  suggestStreamClips,
+  type ImportedClipFile,
   type StreamAspectRatioId,
   type StreamLayoutId,
-  type StreamProbe,
-  type SuggestStreamClipsResult,
+  type SuggestStreamClipsOptions,
 } from "../../lib/streamClips";
 import type { RenderHistoryEntry } from "../../lib/renderHistory";
 import type { StudioProjectDraft } from "../../lib/studioProjects";
@@ -97,10 +98,16 @@ import {
   suggestOutputPath,
 } from "../../lib/studioProjects";
 import {
+  TITLE_MOBILE_CHARS,
+  TITLE_SWEET_SPOT,
+  feedTruncation,
   fitTagBudget,
   normalizeHashtags,
+  packageQueryTargets,
   scoreSeoPackage,
 } from "../../lib/seo";
+import { saveTrendSignals } from "../../lib/performance";
+import { setPinnedComment as rememberPinnedComment } from "../../lib/publishExtras";
 import { RenderJobsPanel } from "../jobs/RenderJobsPanel";
 import { useRenderJob } from "../../lib/useRenderJob";
 import {
@@ -116,8 +123,10 @@ import { Field, TextArea, TextInput } from "../ui/Field";
 import { Modal } from "../ui/Modal";
 import { EmptyState } from "../ui/EmptyState";
 import { LinearProgress } from "../ui/LinearProgress";
+import { VideoPreview } from "./VideoPreview";
+import { StudioNavigation } from "./StudioNavigation";
+import { STUDIO_STAGES, resolveStreamRestore, resolveStudioStage, type StudioStage } from "../../lib/studioWorkflow";
 import { Segmented } from "../ui/Segmented";
-import { StudioStepper, StudioStepMeta } from "./StudioStepper";
 import { PageHeader } from "../layout/PageHeader";
 import {
   SubtitleCase,
@@ -204,58 +213,34 @@ const AGENTS = [
   { id: AUTO_CUT_AGENT_ID, name: "Auto cut" },
 ];
 
-const STEPS: StudioStepMeta[] = [
-  {
-    id: "source",
-    title: "Source",
-    hint: "Footage & output file",
-    icon: <Upload className="size-3.5" />,
-  },
-  {
-    id: "style",
-    title: "Style",
-    hint: "Grade & editing model",
-    icon: <Layers className="size-3.5" />,
-  },
-  {
-    id: "captions",
-    title: "Captions",
-    hint: "Subtitle theme & type",
-    icon: <Captions className="size-3.5" />,
-  },
-  {
-    id: "metadata",
-    title: "Metadata",
-    hint: "Review, title & tags",
-    icon: <Sparkles className="size-3.5" />,
-  },
-  {
-    id: "render",
-    title: "Render",
-    hint: "Preflight & output",
-    icon: <Play className="size-3.5" />,
-  },
-];
-
-const SOURCE_STEP = 0;
-const RENDER_STEP = STEPS.length - 1;
-
 const CHECK_LABELS: Record<string, string> = {
   title_present: "Add a title",
-  title_keyword_frontload: "Frontload a keyword in the first 40 chars",
-  title_length: "Keep the title 20–60 chars",
-  title_ctr_shape: "Open with How/Why/Stop, a number, or a question",
+  title_mobile_fit: "Fit the title in ~40 chars so the mobile feed shows it all",
+  title_query_match: "Put the words of a target search in the title",
+  title_concrete: "Swap hype words for a number, name or result",
+  title_not_shouting: "Use at most two ALL-CAPS words",
+  title_front_loaded: "Move the subject into the first three words",
   title_over_limit: "Shorten past the 100-char limit",
+  hook_strength: "Sharpen the opening hook",
+  description_above_fold: "Say the target search in the first two lines",
   description_length: "Write 100+ chars of description",
-  description_keyword_block: "Keep the 🔍 Search Keywords block",
-  description_hashtag_line: "Keep the hashtag line",
-  description_cta: "Add a subscribe/follow call to action",
-  tags_depth: "Add 8–20 tags",
-  tags_budget_fill: "Fill more of the 500-char tag budget",
-  tags_keyword_coverage: "Cover each keyword in the tags",
-  hashtags_count: "Keep 3–8 hashtags",
+  description_hashtags: "End the description with the hashtag line",
+  description_no_stuffing: "Remove keyword lists (they read as spam)",
+  hashtags_count: "Keep 3–5 hashtags",
   hashtags_postable: "Fix unpostable hashtags",
+  tags_present: "Add 5–15 specific tags",
 };
+
+function titleFeedHint(title: string): string {
+  if (!title.trim()) {
+    return `Names the rendered file too. Aim for ${TITLE_MOBILE_CHARS}–${TITLE_SWEET_SPOT} characters so a phone feed shows the whole line.`;
+  }
+  const feed = feedTruncation(title);
+  if (feed.mobileFits) {
+    return `Fits a phone feed (${feed.chars}/${TITLE_MOBILE_CHARS}). Names the rendered file too, unless you override it in Export.`;
+  }
+  return `Phone feed: “${feed.mobile}” · desktop: “${feed.desktop}”. Names the rendered file too.`;
+}
 
 /**
  * Live per-video SEO checklist: scores the CURRENT edited fields (not the
@@ -268,6 +253,8 @@ function SeoChecklist({
   tags,
   hashtags,
   keywords,
+  queries,
+  hook,
   retention,
   engineQuality,
 }: {
@@ -276,6 +263,8 @@ function SeoChecklist({
   tags: string[];
   hashtags: string[];
   keywords: string[];
+  queries: string[];
+  hook: string;
   retention: number;
   engineQuality: number | null;
 }) {
@@ -288,8 +277,13 @@ function SeoChecklist({
     hashtags,
     keywords,
     retention,
+    { hook, queries },
   );
-  const misses = live.checks.filter((c) => c.of > 0 && c.got < c.of).slice(0, 3);
+  // Biggest misses first: they cost the most reach.
+  const misses = live.checks
+    .filter((c) => c.of > 0 && c.got < c.of)
+    .sort((a, b) => b.of - b.got - (a.of - a.got))
+    .slice(0, 3);
   return (
     <div className="space-y-2 rounded-md border border-border bg-surface-secondary/60 p-2.5">
       <div className="flex flex-wrap items-center gap-2">
@@ -306,7 +300,34 @@ function SeoChecklist({
             retention {retention}/100
           </span>
         )}
+        {hook.trim() && (
+          <span
+            className="tabular-nums text-xs text-muted"
+            title={`Weakest: ${live.hook.weakest} — ${live.hook.fix}`}
+          >
+            hook {live.hook.verdict}/100 · {live.hook.band.toLowerCase()}
+          </span>
+        )}
       </div>
+      {hook.trim() && live.hook.band === "WEAK" && (
+        <p className="flex items-start gap-1.5 text-xs leading-snug text-muted">
+          <Target className="mt-0.5 size-3 shrink-0" />
+          Hook tip: {live.hook.fix}.
+        </p>
+      )}
+      {queries.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1">
+          <span className="text-xs text-muted">Targets:</span>
+          {queries.map((q) => (
+            <span
+              key={q}
+              className="rounded-md bg-surface-tertiary px-1.5 py-0.5 text-xs text-foreground"
+            >
+              {q}
+            </span>
+          ))}
+        </div>
+      )}
       {hashtags.length > 0 && (
         <button
           type="button"
@@ -366,6 +387,11 @@ function packageFromDraft(draft: StudioProjectDraft | null): SeoMetadata | null 
     seo_score: draft.seoScore ?? 0,
     quality_score: draft.seoQualityScore ?? null,
     keywords_analyzed: draft.seoKeywords ? [...draft.seoKeywords] : [],
+    search_queries: draft.seoSearchQueries ? [...draft.seoSearchQueries] : [],
+    ...(Array.isArray(draft.seoDemandQueries)
+      ? { demand_queries: [...draft.seoDemandQueries] }
+      : {}),
+    pinned_comment: draft.seoPinnedComment ?? "",
     review_report: draft.reviewReport ?? undefined,
   };
 }
@@ -410,17 +436,21 @@ interface VideoStudioProps {
   draftLoadKey?: number;
   onDraftChange?: (draft: StudioProjectDraft) => void;
   /** Import downloaded stream clips as their own sidebar sources, so
-   * each one walks the same Source → … → Render steps as a file. */
-  onImportClipsAsSources?: (
-    clips: { inputPath: string; metadata: VideoMetadata | null }[],
-  ) => void;
+   * each one is edited on the same single Studio page as a file. */
+  onImportClipsAsSources?: (clips: ImportedClipFile[]) => void;
   /** Stream runs, owned by App so clips survive tab switches. */
   streamRuns: StreamRunStore;
-  onStreamRunsChange: (store: StreamRunStore) => void;
+  onStreamRunsChange: React.Dispatch<React.SetStateAction<StreamRunStore>>;
+  streamAnalysisJobs: StreamAnalysisJobs;
+  onAnalyzeStream: (url: string, options: SuggestStreamClipsOptions, layout: string) => void;
+  onStopWatchingStream?: (url: string) => void;
+  onRemoveStream: (url: string) => void;
   /** Sidebar-opened run: Studio restores it on arrival. */
   pendingStreamUrl?: string | null;
   streamOpenKey?: number;
   onStreamOpened?: () => void;
+  /** Plus / new short: do not reopen the last stream into this view. */
+  startBlank?: boolean;
   /**
    * App-owned SEO fetch: survives this view unmounting (tab switch,
    * minimize) and merges the result into the matching draft. Resolves
@@ -432,7 +462,7 @@ interface VideoStudioProps {
   ) => Promise<{ meta: SeoMetadata; requestId: number }>;
   /** Live App-owned SEO jobs, keyed by target video (see seoJobs). */
   studioSeoJobs?: Record<string, StudioSeoJob>;
-  onProbeVideo: (path: string) => Promise<VideoMetadata>;
+  onProbeVideo: (path: string, options?: { silent?: boolean }) => Promise<VideoMetadata>;
   onPickVideo: () => Promise<string | null>;
   onOpenFileLocation: (path: string) => Promise<void>;
   onOpenFile: (path: string) => Promise<void>;
@@ -460,9 +490,14 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
   onImportClipsAsSources,
   streamRuns,
   onStreamRunsChange,
+  streamAnalysisJobs,
+  onAnalyzeStream,
+  onStopWatchingStream,
+  onRemoveStream,
   pendingStreamUrl = null,
   streamOpenKey = 0,
   onStreamOpened,
+  startBlank = false,
   onGenerateStudioSeo,
   studioSeoJobs,
   onProbeVideo,
@@ -471,6 +506,23 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
   onOpenFile,
   onSendToSocial,
 }) => {
+  const [activeStage, setActiveStage] = useState<StudioStage>(() => resolveStudioStage(initialDraft?.studioStage, Boolean(initialDraft?.metadata)));
+  const stageHeadingRef = useRef<HTMLHeadingElement>(null);
+  const stageFocusPending = useRef(false);
+  const goToStage = (stage: StudioStage) => {
+    stageFocusPending.current = true;
+    setActiveStage(stage);
+  };
+  const scrollToSection = (id: string) => goToStage(id.replace("studio-", "") as StudioStage);
+  useEffect(() => {
+    if (!stageFocusPending.current) return;
+    stageFocusPending.current = false;
+    stageHeadingRef.current?.focus({ preventScroll: true });
+    document.getElementById("studio-workspace")?.scrollIntoView({ block: "start" });
+  }, [activeStage]);
+  const [streamLayout, setStreamLayout] = useState<StreamLayoutId>(STREAM_LAYOUTS.some(layout => layout.id === initialDraft?.layout) ? initialDraft!.layout as StreamLayoutId : "auto");
+  const [customInstructionsEnabled, setCustomInstructionsEnabled] = useState(initialDraft?.customInstructionsEnabled ?? (initialDraft?.editStrategy === "custom"));
+  const [promptHook, setPromptHook] = useState(initialDraft?.promptHook ?? "");
   const [inputPath, setInputPath] = useState(initialDraft?.inputPath ?? "");
   const [outputPath, setOutputPath] = useState(
     initialDraft?.outputPath ||
@@ -492,6 +544,11 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
   const [selectedAgent, setSelectedAgent] = useState<string>(
     initialDraft?.agentId ?? "claude",
   );
+  const [editStrategy, setEditStrategy] = useState<EditStrategy>(normalizeEditStrategy(initialDraft?.editStrategy));
+  const [removeSilence, setRemoveSilence] = useState(initialDraft?.removeSilence ?? true);
+  const [removeRetakes, setRemoveRetakes] = useState(initialDraft?.removeRetakes ?? true);
+  const [highlightTarget, setHighlightTarget] = useState(initialDraft?.highlightTarget ?? 30);
+  const sourceRequestRef = useRef(0);
   const [agentProbe, setAgentProbe] = useState<Record<string, AgentProbe>>({});
   const [probingAgents, setProbingAgents] = useState(false);
   const [burnInCaptions, setBurnInCaptions] = useState<boolean>(
@@ -509,23 +566,14 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
   const [subtitleCase, setSubtitleCase] = useState<SubtitleCase>(
     (initialDraft?.subtitleCase as SubtitleCase | undefined) ?? "uppercase",
   );
-  const [promptHook, setPromptHook] = useState<string>(
-    initialDraft?.promptHook ?? "",
-  );
-  const customPromptError = promptHook.trim()
-    ? promptHook.trim().length > 4000
-      ? "Keep the custom prompt within 4,000 characters."
-      : selectedAgent === AUTO_CUT_AGENT_ID
-        ? "Choose an editing model to apply your custom prompt. Auto cut cannot apply prompts."
-        : probingAgents
-          ? "Checking the editing model…"
-          : agentProbe[selectedAgent]?.available === false
-            ? "The selected editing model is unavailable. Choose an available model."
-            : null
-    : null;
-  const [activeStep, setActiveStep] = useState<number>(
-    initialDraft?.activeStep ?? SOURCE_STEP,
-  );
+  const agentError = selectedAgent === AUTO_CUT_AGENT_ID ? "Choose an available CLI in Settings → CLI tools."
+    : probingAgents ? "Checking your local CLIs…"
+    : agentProbe[selectedAgent]?.available === false ? "This CLI is unavailable. Choose another or configure it in Settings → CLI tools." : null;
+  const streamAgentError = selectedAgent === AUTO_CUT_AGENT_ID ? null : agentError;
+  const usesEditingAgent = editStrategy === "highlights" || (customInstructionsEnabled && Boolean(promptHook.trim()));
+  const editError = (usesEditingAgent ? agentError : null)
+    || (customInstructionsEnabled && promptHook.length > 4000 ? "Keep custom instructions within 4,000 characters." : null);
+
 
   // Per-video context override (blank = use the default channel profile).
   // A stored copy of the old built-in default clears to blank so the
@@ -538,7 +586,7 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
 
   // No placeholder content: titles, tags, and the review report only exist
   // after the engine has actually analyzed the video's transcript. Until
-  // then the Metadata step shows honest empty states. A persisted draft
+  // then Title & tags shows honest empty states. A persisted draft
   // rehydrates the last package so alternates survive reloads.
   const [seoMetadata, setSeoMetadata] = useState<SeoMetadata | null>(() =>
     packageFromDraft(initialDraft),
@@ -553,6 +601,9 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
   const [seoTags, setSeoTags] = useState<string[]>(
     initialDraft?.seoTags ?? [],
   );
+  const [pinnedComment, setPinnedComment] = useState<string>(
+    initialDraft?.seoPinnedComment ?? "",
+  );
   const [newTagInput, setNewTagInput] = useState<string>("");
   const [copiedSection, setCopiedSection] = useState<string | null>(null);
 
@@ -562,6 +613,9 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
     initialDraft?.metadata ?? null,
   );
   const [probeError, setProbeError] = useState<string | null>(null);
+  useEffect(() => {
+    if (probeError) notify("Could not read video", probeError, "error");
+  }, [probeError]);
   // Native file drops carry real paths (DOM File objects have none), so the
   // Tauri drag-drop event owns drops; the DOM handlers below are the browser
   // fallback. probeRef keeps the event listener on the latest closure.
@@ -578,9 +632,14 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
     localStorage.setItem("tuari_channel_context", val);
   };
 
+  const [streamUrl, setStreamUrl] = useState("");
+  const [streamQuery, setStreamQuery] = useState("");
+  const [streamUseAsSource, setStreamUseAsSource] = useState<number | null>(null);
+
   // Load a sidebar-selected source: replaces every persisted field, keeps
   // the live job/log state untouched.
   const loadDraft = (draft: StudioProjectDraft) => {
+    if (!job.isRunning && job.inputVideo !== draft.inputPath) job.reset();
     setInputPath(draft.inputPath);
     setOutputPath(
       draft.outputPath ||
@@ -591,25 +650,36 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
     );
     setOutputTouched(draft.outputTouched ?? false);
     setMetadata(draft.metadata);
+    setActiveStage(resolveStudioStage(draft.studioStage, Boolean(draft.metadata)));
+    setPromptHook(draft.promptHook ?? "");
+    setCustomInstructionsEnabled(draft.customInstructionsEnabled ?? (draft.editStrategy === "custom"));
+    setStreamLayout(STREAM_LAYOUTS.some(layout => layout.id === draft.layout) ? draft.layout as StreamLayoutId : "auto");
     setSelectedPreset(draft.presetId);
     setAspectRatio(parseAspectRatio(draft.aspectRatio ?? "9:16"));
     setSelectedAgent(draft.agentId);
+    sourceRequestRef.current++;
+    setEditStrategy(normalizeEditStrategy(draft.editStrategy));
+    setRemoveSilence(draft.removeSilence ?? true);
+    setRemoveRetakes(draft.removeRetakes ?? true);
+    setHighlightTarget(draft.highlightTarget ?? 30);
+    setIsProbing(false);
+    setProbeError(null);
     setBurnInCaptions(draft.burnInCaptions);
     setSubtitleStyle(draft.subtitleStyle);
     setSubtitlePosition(draft.subtitlePosition as SubtitlePosition);
     setSubtitleSize(draft.subtitleSize as SubtitleSize);
     setSubtitleCase(draft.subtitleCase as SubtitleCase);
-    setPromptHook(draft.promptHook);
     setContextOverride(draft.contextOverride);
     localStorage.setItem("tuari_channel_context", draft.contextOverride);
     setSeoTitle(draft.seoTitle);
     setSeoDescription(draft.seoDescription);
     setSeoTags(draft.seoTags);
+    setPinnedComment(draft.seoPinnedComment ?? "");
     setSeoMetadata(packageFromDraft(draft));
     setReviewReport(draft.reviewReport);
-    setActiveStep(
-      Math.min(Math.max(draft.activeStep, SOURCE_STEP), RENDER_STEP),
-    );
+    setStreamUrl("");
+    setStreamQuery("");
+    setStreamUseAsSource(null);
   };
 
   const draftLoadKeyRef = useRef(draftLoadKey);
@@ -632,12 +702,20 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
       presetId: selectedPreset,
       aspectRatio,
       agentId: selectedAgent,
+      editStrategy,
+      removeSilence,
+      removeRetakes,
+      highlightTarget,
       burnInCaptions,
       subtitleStyle,
       subtitlePosition,
       subtitleSize,
       subtitleCase,
       promptHook,
+      customInstructionsEnabled,
+      modelId: "",
+      studioStage: activeStage,
+      layout: streamLayout,
       contextOverride,
       seoTitle,
       seoDescription,
@@ -651,8 +729,14 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
       seoKeywords: seoMetadata?.keywords_analyzed
         ? [...seoMetadata.keywords_analyzed]
         : [],
+      seoSearchQueries: seoMetadata?.search_queries
+        ? [...seoMetadata.search_queries]
+        : [],
+      seoDemandQueries: Array.isArray(seoMetadata?.demand_queries)
+        ? [...seoMetadata.demand_queries]
+        : undefined,
+      seoPinnedComment: pinnedComment,
       reviewReport,
-      activeStep,
       updatedAt: new Date().toISOString(),
       createdAt: initialDraft?.createdAt ?? new Date().toISOString(),
     });
@@ -665,20 +749,33 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
     selectedPreset,
     aspectRatio,
     selectedAgent,
+    editStrategy,
+    removeSilence,
+    removeRetakes,
+    highlightTarget,
     burnInCaptions,
     subtitleStyle,
     subtitlePosition,
     subtitleSize,
     subtitleCase,
     promptHook,
+    customInstructionsEnabled,
+    activeStage,
+    streamLayout,
     contextOverride,
     seoTitle,
     seoDescription,
     seoTags,
     seoMetadata,
+    pinnedComment,
     reviewReport,
-    activeStep,
   ]);
+
+  // The pinned comment rides to Zernio by video path (see publishExtras),
+  // so every Studio, Social and Queue publish of this short carries it.
+  useEffect(() => {
+    rememberPinnedComment([inputPath, outputPath], pinnedComment);
+  }, [inputPath, outputPath, pinnedComment]);
 
   // Tracks mount state: the App-owned fetch below outlives this view
   // (tab switch, minimize), so local state writes must stop at unmount —
@@ -688,6 +785,7 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      sourceRequestRef.current++;
     };
   }, []);
 
@@ -701,6 +799,8 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
     setSeoTitle(meta.title);
     setSeoDescription(meta.description);
     setSeoTags(meta.tags);
+    // A package without a suggestion keeps whatever the user typed.
+    if (meta.pinned_comment?.trim()) setPinnedComment(meta.pinned_comment);
     if (meta.review_report) {
       setReviewReport(meta.review_report);
     }
@@ -723,7 +823,11 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [studioSeoJobs, inputPath, outputPath]);
 
-  const handleGenerateSeo = async (customPath?: string, customContext?: string, useEditingModel = true) => {
+  const handleGenerateSeo = async (customPath?: string, customContext?: string) => {
+    if (metadata?.audio_channels === 0) {
+      notify("No audio track", "This video has no audio to analyze. You can still write a title and description, and export it.", "info");
+      return;
+    }
     const visibleRequest = ++visibleSeoRequestRef.current;
     // Review the rendered short when one exists, else the source footage.
     // Either path must be a real file: the engine refuses to template
@@ -736,6 +840,9 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
       customContext !== undefined
         ? customContext
         : getEffectiveContext(contextOverride);
+    // Title & tags uses an installed CLI even when the cut is Auto.
+    // Edit mode only decides the cut, not the package.
+    const seoAgentId = seoAgentForPackage(selectedAgent, agentProbe);
 
     setIsGeneratingSeo(true);
     try {
@@ -745,7 +852,7 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
       if (!generate) return;
       const { meta, requestId } = await generate(targetVideo, {
         context: contextToUse,
-        agentId: useEditingModel ? selectedAgent : undefined,
+        agentId: seoAgentId,
       });
       if (!mountedRef.current || visibleSeoRequestRef.current !== visibleRequest) return;
       appliedSeoRef.current[targetVideo] = requestId;
@@ -783,6 +890,7 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
       (target) => !!target && studioSeoJobs[target]?.status === "running",
     );
   const seoBusy = isGeneratingSeo || backgroundSeoRunning;
+  const queryTargets = packageQueryTargets(seoMetadata);
 
   const [trendingNiche, setTrendingNiche] = useState("");
   const [trending, setTrending] = useState<TrendingResult | null>(null);
@@ -790,115 +898,91 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
 
   // Stream clip finder: paste a public YouTube / Twitch VOD link, get
   // the best windows. Source only collects footage — taste choices
-  // (model, length, framing) live in Style; the finder uses the Style
+  // (model, length, framing) live in Edit; the finder uses the Edit
   // editing model with the Standard length band.
-  const [streamUrl, setStreamUrl] = useState("");
   // Framing: the engine always auto-detects the facecam, so picking a
   // framing is enough — there is no manual face-source picker. Auto
   // split-stacks corner cams and face-centers everything else.
-  const [streamLayout, setStreamLayout] =
-    useState<StreamLayoutId>("auto");
-  const [streamProbe, setStreamProbe] = useState<StreamProbe | null>(null);
-  const [streamProbing, setStreamProbing] = useState(false);
-  const [streamAnalyzing, setStreamAnalyzing] = useState(false);
-  const [streamResult, setStreamResult] =
-    useState<SuggestStreamClipsResult | null>(null);
-  const [streamError, setStreamError] = useState<string | null>(null);
-  const [streamQuery, setStreamQuery] = useState("");
-  const [streamSelected, setStreamSelected] = useState<number[]>([]);
+
+  // App owns the request and run data. A page/source switch cannot drop a
+  // completion, and a result for another URL never leaks into this view.
+  const streamRun = getStreamRun(streamRuns, streamUrl);
+  const streamJob = streamAnalysisJobs[streamUrl.trim()];
+  const streamProbe = streamRun?.probe ?? null;
+  const streamResult = streamRun?.result ?? null;
+  const streamWatching = isWatchableLiveRun(streamRun) || streamJob?.status === "watching";
+  const streamAnalyzing = streamJob?.status === "running" && !streamWatching;
+  const streamProbing = streamAnalyzing && !streamProbe;
+  const streamSelected = streamRun?.selected ?? [];
+  const setStreamSelected = (selection: React.SetStateAction<number[]>) => {
+    const url = streamUrl.trim();
+    onStreamRunsChange((prev) => {
+      const run = prev.runs[url];
+      if (!run?.result) return prev;
+      const selected = typeof selection === "function" ? selection(run.selected) : selection;
+      return { ...prev, runs: { ...prev.runs, [url]: { ...run, selected, updatedAt: new Date().toISOString() } } };
+    });
+  };
   const [streamImporting, setStreamImporting] = useState(false);
-  const [streamUseAsSource, setStreamUseAsSource] = useState<number | null>(null);
+  const [streamImportProgress, setStreamImportProgress] = useState<{
+    current: number;
+    total: number;
+  } | null>(null);
 
   // Untouched output names auto-follow the Shorts title (then the stream
   // title, then the input file). Editing the name in Render pins it; the
   // reset button there hands control back to this effect.
   const streamTitle = streamResult?.title || streamProbe?.title || "";
   useEffect(() => {
-    // Once a render is on disk, outputPath is that file: never retarget it
-    // at a title-derived name that was never rendered (post-render SEO used
-    // to do exactly that, leaving the review popup's Play/Reveal pointing
-    // at a nonexistent file). Untouched paths heal back to the real file.
-    const rendered =
-      latestCompletedOutput(inputPath, renderHistory) ??
-      (job.result?.success ? outputPath : null);
-    if (rendered) {
-      if (!outputTouched) {
-        setOutputPath((prev) => (prev === rendered ? prev : rendered));
-      }
-      return;
-    }
-    if (!shouldAutoNameOutput(outputTouched, rendered)) return;
-    const next = suggestOutputPath({
-      seoTitle,
-      streamTitle,
-      inputPath,
-    }).path;
-    setOutputPath((prev) => (prev === next ? prev : next));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [outputTouched, seoTitle, streamTitle, inputPath, renderHistory]);
-
-  // Persistent stream runs live in App state (mirrored to localStorage
-  // there), so tab switches — which unmount this view — never lose them.
-
-  // Auto-save the visible run whenever its data changes. Guarded to the
-  // matching URL so typing a new link never files old clips under it.
-  useEffect(() => {
     const url = streamUrl.trim();
-    if (!url) return;
-    const ownsResult = streamResult && streamResult.url === url;
-    const ownsProbe =
-      !streamResult && streamProbe && streamProbe.url === url;
-    if (!ownsResult && !ownsProbe) return;
-    onStreamRunsChange(
-      upsertStreamRun(streamRuns, {
-        ...(streamRuns.runs[url] ?? blankStreamRun(url)),
-        url,
-        probe: streamProbe,
-        result: streamResult,
-        selected: streamSelected,
-        agent: selectedAgent,
-        workflow: "review",
-        length: "standard",
-        layout: streamLayout,
-        faceRoi: "auto",
-        updatedAt: new Date().toISOString(),
-      }),
-    );
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    streamUrl,
-    streamProbe,
-    streamResult,
-    streamSelected,
-    selectedAgent,
-    streamLayout,
-  ]);
+    onStreamRunsChange((prev) => {
+      const run = prev.runs[url];
+      if (!run || run.layout === streamLayout) return prev;
+      return { ...prev, runs: { ...prev.runs, [url]: { ...run, layout: streamLayout } } };
+    });
+  }, [streamUrl, streamLayout, onStreamRunsChange]);
 
   const loadRunIntoView = (run: StreamRun) => {
+    setActiveStage("source");
     setStreamUrl(run.url);
-    setStreamProbe(run.probe);
-    setStreamResult(run.result);
-    setStreamSelected(run.selected);
     // Stored runs from before auto framing predate the layout field.
     setStreamLayout((run.layout as StreamLayoutId) || "auto");
     setStreamQuery("");
-    setStreamError(null);
+  };
+
+  const forgetStream = (url: string) => {
+    if (streamUrl.trim() === url.trim()) {
+      setStreamUrl("");
+      setStreamQuery("");
+      setStreamUseAsSource(null);
+    }
+    onRemoveStream(url);
   };
 
   const handleStreamUrlChange = (value: string) => {
     setStreamUrl(value);
     // Pasting a known link restores its saved clips instantly.
     const run = getStreamRun(streamRuns, value);
-    if (run && run.result) loadRunIntoView(run);
+    if (run) loadRunIntoView(run);
   };
 
-  // Tab switches remount this view blank: restore the most recent
-  // analyzed run so returning never shows an empty card.
+  // Tab switches remount this view blank. Reopen a busy clip job or the
+  // last stream so returning is not empty — unless Plus asked for a new short.
   const restoredStreamRef = useRef(false);
   useEffect(() => {
     if (restoredStreamRef.current) return;
     restoredStreamRef.current = true;
-    const run = mostRecentUsableRun(streamRuns);
+    const runningUrl = Object.values(streamAnalysisJobs).find(isBusyClipJob)?.url ?? null;
+    const mode = resolveStreamRestore({
+      startBlank,
+      hasSourceInput: Boolean(initialDraft?.inputPath),
+      hasBusyClipJob: Boolean(runningUrl),
+    });
+    if (mode === "none") return;
+    const run =
+      mode === "busy-job"
+        ? (runningUrl && getStreamRun(streamRuns, runningUrl)) || mostRecentUsableRun(streamRuns)
+        : mostRecentUsableRun(streamRuns);
     if (run) loadRunIntoView(run);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -906,19 +990,32 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
   // Sidebar-opened run: restore it on arrival, then clear the request.
   useEffect(() => {
     if (!pendingStreamUrl || !streamOpenKey) return;
+    setActiveStage("source");
     const run = getStreamRun(streamRuns, pendingStreamUrl);
     if (run) {
       loadRunIntoView(run);
     } else {
       setStreamUrl(pendingStreamUrl);
-      setStreamProbe(null);
-      setStreamResult(null);
-      setStreamSelected([]);
-      setStreamError(null);
     }
     onStreamOpened?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [streamOpenKey]);
+
+  // Sidebar forget must clear this view even when Plus did not remount.
+  const savedStreamUrlRef = useRef<string | null>(null);
+  useEffect(() => {
+    const url = streamUrl.trim();
+    if (url && getStreamRun(streamRuns, url)) {
+      savedStreamUrlRef.current = url;
+      return;
+    }
+    if (savedStreamUrlRef.current && savedStreamUrlRef.current === url) {
+      savedStreamUrlRef.current = null;
+      setStreamUrl("");
+      setStreamQuery("");
+      setStreamUseAsSource(null);
+    }
+  }, [streamRuns, streamUrl]);
 
   const handleFetchTrending = async () => {
     const niche = trendingNiche.trim() || getDefaultProfile()?.niche || "";
@@ -937,6 +1034,19 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
         youtubeKey?.trim() || undefined,
       );
       setTrending(res);
+      // Every later SEO run (Studio, Queue) is steered by these for a week.
+      if (res.keywords.length || res.queries?.length) {
+        saveTrendSignals({
+          niche: res.niche,
+          terms: res.keywords.slice(0, 10).map((k) => k.term),
+          queries: [...(res.queries ?? [])],
+          savedAt: new Date().toISOString(),
+        });
+      }
+      if (res.error) notify("Trending unavailable", res.error, "error");
+      else if (!youtubeKey?.trim() && res.queries?.length) notify("Searches ready", "Showing what people search. Add a YouTube Data API key in Settings → API keys for rising-video terms too.", "info");
+      else if (res.note || (res.keywords.length === 0 && !res.queries?.length)) notify("Trending search", res.note || "No trending terms found. Try another topic.", "info");
+      else notify("Trending terms ready", `${res.keywords.length} terms found. Select a term to add it to your tags.`, "success");
     } catch (err) {
       notify(
         "Trending failed",
@@ -978,24 +1088,9 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
     return `${months[month - 1]} ${Number(raw.slice(6, 8))}, ${raw.slice(0, 4)}`;
   };
 
-  // Video card loads in the background and never blocks clip setup.
-  const streamUrlRef = useRef("");
-  streamUrlRef.current = streamUrl;
-  const handleStreamProbe = async (url: string) => {
-    setStreamProbing(true);
-    try {
-      const probe = await probeStream(url);
-      if (probe.url === streamUrlRef.current) setStreamProbe(probe);
-    } catch {
-      // The card is decoration; analysis reports the real error.
-    } finally {
-      setStreamProbing(false);
-    }
-  };
-
-  const handleStreamAnalyze = async () => {
-    if (customPromptError) {
-      notify("Custom prompt needs an editing model", customPromptError, "error");
+  const handleStreamAnalyze = () => {
+    if (streamAgentError) {
+      notify("Editing model unavailable", streamAgentError, "error");
       return;
     }
     const url = streamUrl.trim();
@@ -1011,39 +1106,10 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
       );
       return;
     }
-    setStreamError(null);
-    setStreamResult(null);
-    setStreamSelected([]);
-    setStreamProbe(null);
-    setStreamAnalyzing(true);
-    void handleStreamProbe(url);
-    try {
-      const res = await suggestStreamClips(
-        url,
-        streamSuggestOptions({
-          agentId: selectedAgent,
-          channelContext: getEffectiveContext(contextOverride) || undefined,
-          promptHook: promptHook.trim() ? promptHook.trim() : undefined,
-        }),
-      );
-      setStreamResult(res);
-      const all = res.clips.map((_, i) => i);
-      setStreamSelected(all);
-      if (res.clips.length === 0) {
-        notify(
-          "No clips cleared the bar",
-          "Nothing in this video scored high enough — try a longer video",
-          "info",
-        );
-      }
-    } catch (err) {
-      const message =
-        err instanceof Error ? err.message : "Could not analyze stream";
-      setStreamError(message);
-      notify("Stream analysis failed", message, "error");
-    } finally {
-      setStreamAnalyzing(false);
-    }
+    onAnalyzeStream(url, {
+      ...streamSuggestOptions({ agentId: selectedAgent, channelContext: getEffectiveContext(contextOverride) || undefined }),
+      elevenlabsKey: elevenLabsKey,
+    }, streamLayout);
   };
 
   const streamVisibleClips = useMemo(() => {
@@ -1069,8 +1135,8 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
 
   // Import the selected clips as their own sidebar sources: downloads
   // only the winning windows (never the full VOD), probes each one, and
-  // hands them to App so every clip walks the same Source → Style →
-  // Captions → Metadata → Render steps as an uploaded file.
+  // hands them to App so every clip is edited on the same single Studio
+  // page as an uploaded file. One failed window must not discard the rest.
   const handleImportClipsAsSources = async () => {
     const res = streamResult;
     const url = streamUrl.trim();
@@ -1080,51 +1146,61 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
       notify("Import unavailable", "The studio host did not provide a source importer", "error");
       return;
     }
+    const stamp = Date.now();
+    const clips = indexes.flatMap((i) => {
+      const clip = res.clips[i];
+      if (!clip) return [];
+      return [{
+        start: clip.start,
+        end: clip.end,
+        label: `Clip ${i + 1}`,
+        title: clip.reason.trim(),
+        outputName: streamClipSourceName(streamTitle, stamp, i),
+      }];
+    });
+    if (clips.length === 0) {
+      notify("Import failed", "None of the selected clips could be downloaded", "error");
+      return;
+    }
     setStreamImporting(true);
+    setStreamImportProgress({ current: 0, total: clips.length });
     try {
-      const dir = dirPrefixOf(outputPath) || dirPrefixOf(inputPath);
-      const stamp = Date.now();
-      const imported: { inputPath: string; metadata: VideoMetadata | null }[] = [];
-      for (let n = 0; n < indexes.length; n++) {
-        const i = indexes[n];
-        const clip = res.clips[i];
-        if (!clip) continue;
-        const workInput = `${dir}${streamClipSourceName(streamTitle, stamp, n)}`;
-        const fetched = await fetchStreamClip(url, clip.start, clip.end, workInput);
-        if (!fetched.success) {
-          notify(
-            `Clip ${i + 1} skipped`,
-            fetched.stderr.trim().slice(0, 220) || "clip download failed",
-            "error",
-          );
-          continue;
-        }
-        let metadata: VideoMetadata | null = null;
-        try {
-          metadata = await onProbeVideo(workInput);
-        } catch {
-          metadata = null;
-        }
-        imported.push({ inputPath: workInput, metadata });
-      }
+      const imported = await downloadStreamClipsAsSources({
+        url,
+        dirPrefix: dirPrefixOf(outputPath) || dirPrefixOf(inputPath),
+        clips,
+        probe: (path) => onProbeVideo(path, { silent: true }),
+        onProgress: (current, total) => setStreamImportProgress({ current, total }),
+        onSkip: (label, message) => notify(`${label} skipped`, message, "error"),
+      });
       if (imported.length === 0) {
         notify("Import failed", "None of the selected clips could be downloaded", "error");
         return;
       }
-      onImportClipsAsSources?.(imported);
+      onImportClipsAsSources(imported);
+      const skipped = clips.length - imported.length;
       notify(
         "Clips imported as sources",
-        `${imported.length} clip${imported.length === 1 ? "" : "s"} added — open each from the sidebar and walk it through Style → Captions → Metadata → Render`,
-        "success",
+        skipped > 0
+          ? `${imported.length} clip${imported.length === 1 ? "" : "s"} added, ${skipped} skipped — open each from the sidebar to edit and render it`
+          : `${imported.length} clip${imported.length === 1 ? "" : "s"} added — open each from the sidebar to edit and render it`,
+        skipped > 0 ? "warning" : "success",
+      );
+    } catch (err) {
+      notify(
+        "Import failed",
+        err instanceof Error ? err.message : "Could not import the selected clips",
+        "error",
       );
     } finally {
       setStreamImporting(false);
+      setStreamImportProgress(null);
     }
   };
 
   // Use one stream clip as this short's source: downloads just that
-  // window, probes it, and advances to Style so the normal
-  // Source → Style → Captions → Metadata → Render flow continues.
+  // window, probes it, and scrolls to Edit so the single-page flow
+  // continues in the Edit & format stage.
   const handleUseClipAsSource = async (index: number) => {
     const res = streamResult;
     const url = streamUrl.trim();
@@ -1132,22 +1208,25 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
     if (!res || !clip || streamUseAsSource !== null || streamImporting) return;
     setStreamUseAsSource(index);
     try {
-      const dir = dirPrefixOf(outputPath) || dirPrefixOf(inputPath);
-      const workInput = `${dir}${streamClipSourceName(streamTitle, Date.now(), index)}`;
+      const workInput = clipWorkPath(
+        dirPrefixOf(outputPath) || dirPrefixOf(inputPath),
+        streamClipSourceName(streamTitle, Date.now(), index),
+      );
       const fetched = await fetchStreamClip(url, clip.start, clip.end, workInput);
       if (!fetched.success) {
         throw new Error(
           fetched.stderr.trim().slice(0, 220) || "clip download failed",
         );
       }
-      setInputPath(workInput);
-      await handleProbePath(workInput);
+      const saved = resolvedClipOutput(fetched, workInput);
+      setInputPath(saved);
+      await handleProbePath(saved);
       notify(
         "Clip set as source",
-        `Clip ${index + 1} (${formatClipRange(clip.start, clip.end)}) is now the source — continue in Style`,
+        `Clip ${index + 1} (${formatClipRange(clip.start, clip.end)}) is now the source — continue in Edit & format`,
         "success",
       );
-      goToStep(SOURCE_STEP + 1);
+      scrollToSection("studio-edit");
     } catch (err) {
       notify(
         "Could not use clip",
@@ -1164,32 +1243,31 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
   // startedJobIdRef tracks the live job id for the finish callback without
   // relying on the render closure.
   const startedJobIdRef = useRef<string | null>(null);
-  const job = useRenderJob(async ({ status, result, error }) => {
+  const job = useRenderJob(async ({ status, result, error, inputVideo: finishedInput, outputVideo: finishedOutput }) => {
     const finishedId = startedJobIdRef.current;
     if (status === "completed" && result?.success) {
       const warnings = renderWarningsFor(result);
       if (warnings.length > 0) {
-        notify("Short rendered with warnings", warnings[0].message, "warning");
+        notify("Short rendered with warnings", warnings.map(w => [w.message, w.detail].filter(Boolean).join(" — ")).join("\n"), "warning");
       } else {
-        notify("Short rendered", `Output saved to ${outputPath}`, "success");
+        notify("Short rendered", `Output saved to ${finishedOutput}`, "success");
       }
-      onJobUpdate?.({ running: false, outputPath, success: true, jobId: finishedId ?? undefined });
+      onJobUpdate?.({ running: false, outputPath: finishedOutput, success: true, jobId: finishedId ?? undefined });
       try {
-        await handleGenerateSeo(outputPath);
-        setShowPostRenderModal(true);
+        if (finishedInput === inputPath && metadata?.audio_channels !== 0) await handleGenerateSeo(finishedOutput);
       } catch (e) {
         console.error("Auto post-render review error:", e);
       }
     } else if (status === "cancelled") {
       notify("Render cancelled", "The background job was stopped", "info");
-      onJobUpdate?.({ running: false, outputPath, success: false, jobId: finishedId ?? undefined });
+      onJobUpdate?.({ running: false, outputPath: finishedOutput, success: false, jobId: finishedId ?? undefined });
     } else {
       notify(
         "Render failed",
         error || "Render process finished with error code.",
         "error",
       );
-      onJobUpdate?.({ running: false, outputPath, success: false, jobId: finishedId ?? undefined });
+      onJobUpdate?.({ running: false, outputPath: finishedOutput, success: false, jobId: finishedId ?? undefined });
     }
     startedJobIdRef.current = null;
   });
@@ -1204,12 +1282,32 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Degraded-but-successful renders (fallback, no transcript, agent failure)
-  // get an explicit banner so they can't pass as finished shorts.
-  const renderWarnings = useMemo(
-    () => renderWarningsFor(job.result),
-    [job.result],
-  );
+
+  useEffect(() => {
+    // Once a render is on disk, outputPath is that file: never retarget it
+    // at a title-derived name that was never rendered (post-render SEO used
+    // to do exactly that, leaving the review popup's Play/Reveal pointing
+    // at a nonexistent file). Untouched paths heal back to the real file.
+    if (job.isRunning) return;
+    const rendered =
+      latestCompletedOutput(inputPath, renderHistory) ??
+      (job.result?.success && job.inputVideo === inputPath ? job.outputVideo : null);
+    if (rendered) {
+      if (!outputTouched) {
+        setOutputPath((prev) => (prev === rendered ? prev : rendered));
+      }
+      return;
+    }
+    if (!shouldAutoNameOutput(outputTouched, rendered)) return;
+    const next = suggestOutputPath({
+      seoTitle,
+      streamTitle,
+      inputPath,
+    }).path;
+    setOutputPath((prev) => (prev === next ? prev : next));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [outputTouched, seoTitle, streamTitle, inputPath, renderHistory, job.result, job.inputVideo, job.outputVideo, job.isRunning]);
+
 
   // Probe each editing agent's headless availability once per mount.
   // Auto-selects the first available agent when the default is unusable.
@@ -1300,7 +1398,7 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
           if (!dropzoneRef.current) {
             notify(
               "Drop ignored",
-              "Switch to the Source footage step to load a dropped video.",
+              "Drop the video onto the Video file box to load it.",
               "info",
             );
             return;
@@ -1339,27 +1437,37 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
 
   const handleProbePath = async (targetPath: string) => {
     if (!targetPath.trim()) return;
+    setActiveStage("source");
     setIsProbing(true);
     setProbeError(null);
+    setMetadata(null);
+    if (targetPath.trim() !== inputPath.trim()) {
+      visibleSeoRequestRef.current++;
+      setSeoTitle(""); setSeoDescription(""); setSeoTags([]); setSeoMetadata(null); setReviewReport(null);
+      setOutputTouched(false);
+      setOutputPath(suggestOutputPath({ inputPath: targetPath.trim() }).path);
+      if (!job.isRunning) job.reset();
+    }
+    const request = ++sourceRequestRef.current;
     try {
       const meta = await onProbeVideo(targetPath.trim());
+      if (!mountedRef.current || request !== sourceRequestRef.current) return;
       setMetadata(meta);
-      // The output name auto-derives (title → stream → input) until the
-      // user edits it in Render, so probing no longer writes it.
-      // Importing a file must not automatically send its transcript to an
-      // editing model. Build the grounded statistical package, then let
-      // Re-analyze/Render explicitly use the selected model.
-      void handleGenerateSeo(targetPath.trim(), undefined, false).catch(() => {});
+      goToStage("edit");
     } catch (err: unknown) {
+      if (!mountedRef.current || request !== sourceRequestRef.current) return;
       setProbeError(
         err instanceof Error ? err.message : "Failed to probe file",
       );
       setMetadata(null);
     } finally {
-      setIsProbing(false);
+      if (mountedRef.current && request === sourceRequestRef.current) setIsProbing(false);
     }
   };
   probeRef.current = handleProbePath;
+  useEffect(() => {
+    if (inputPath.trim() && !metadata && !isProbing && !probeError) void probeRef.current(inputPath);
+  }, [inputPath, metadata, isProbing, probeError]);
 
   const handleBrowseFile = async () => {
     try {
@@ -1369,7 +1477,7 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
         await handleProbePath(selected);
       }
     } catch (err) {
-      console.error("File selection error:", err);
+      notify("Could not select video", err instanceof Error ? err.message : String(err), "error");
     }
   };
 
@@ -1451,36 +1559,42 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
 
   const handleRender = async () => {
     if (!inputPath || !outputPath || job.isRunning) return;
-    if (customPromptError) {
-      notify("Custom prompt cannot be applied", customPromptError, "error");
-      setActiveStep(SOURCE_STEP + 1);
+    if (editError) {
+      notify("Choose an editing model", editError, "error");
+      scrollToSection("studio-edit");
       return;
     }
-    setActiveStep(RENDER_STEP);
+    const requestedOutput = outputPath.trim() === inputPath.trim()
+      ? suggestOutputPath({ inputPath }).path : outputPath;
+    const renderOutput = outputTouched ? requestedOutput : nextAutomaticExport(
+      requestedOutput, editStrategy,
+      [inputPath, ...renderHistory.map(entry => entry.outputVideo),
+        ...(job.result?.success && job.outputVideo ? [job.outputVideo] : [])],
+    );
+    if (renderOutput !== outputPath) setOutputPath(renderOutput);
+    scrollToSection("studio-render");
     onJobUpdate?.({
       running: true,
       progress: 0,
       label: "Starting render job",
-      outputPath,
+      outputPath: renderOutput,
     });
 
     try {
       const effectiveLayout = effectiveLayoutForAspect(streamLayout, aspectRatio);
       const id = await job.start({
         input_video: inputPath,
-        output_video: outputPath,
+        output_video: renderOutput,
         preset_id: selectedPreset,
-        agent_id: selectedAgent,
+        ...automationParams(editStrategy, selectedAgent, highlightTarget, removeSilence, removeRetakes, promptHook, customInstructionsEnabled),
         aspect_ratio: aspectRatio,
         subtitle_style: burnInCaptions ? subtitleStyle : "none",
         subtitle_position: subtitlePosition,
         subtitle_size: subtitleSize,
         subtitle_case: subtitleCase,
-        target_duration: 0, // 0 = Auto Dynamic Smart Cut
         layout: effectiveLayout,
         // The engine always auto-detects the face: no manual face source.
         face_roi: "auto",
-        prompt_hook: promptHook.trim() ? promptHook.trim() : undefined,
         elevenlabs_key:
           elevenLabsKey?.trim() ? elevenLabsKey.trim() : undefined,
         channel_context: getEffectiveContext(contextOverride) || undefined,
@@ -1491,9 +1605,9 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
       startedJobIdRef.current = id;
       onRenderStarted?.(id, {
         input_video: inputPath,
-        output_video: outputPath,
+        output_video: renderOutput,
         preset_id: selectedPreset,
-        agent_id: selectedAgent,
+        agent_id: usesEditingAgent ? selectedAgent : "auto",
         meta_title: seoTitle.trim() ? seoTitle.trim() : undefined,
         meta_desc: seoDescription.trim() ? seoDescription.trim() : undefined,
         meta_tags: seoTags.length > 0 ? [...seoTags] : undefined,
@@ -1504,7 +1618,7 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
         err instanceof Error ? err.message : "Could not start render job",
         "error",
       );
-      onJobUpdate?.({ running: false, outputPath, success: false });
+      onJobUpdate?.({ running: false, outputPath: renderOutput, success: false });
     }
   };
 
@@ -1515,7 +1629,7 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
   // be a not-yet-rendered target name). Falls back to outputPath pre-render.
   const playableOutput =
     latestCompletedOutput(inputPath, renderHistory) ??
-    (job.result?.success ? outputPath : null) ??
+    (job.result?.success && job.inputVideo === inputPath ? job.outputVideo : null) ??
     outputPath;
 
   const renderTagEditor = () => (
@@ -1547,22 +1661,12 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
     </div>
   );
 
-  // Step navigation + completion state
-  const canRender = Boolean(inputPath.trim() && outputPath.trim() && !customPromptError);
-  const canContinue = activeStep === SOURCE_STEP
-    ? Boolean(inputPath.trim())
-    : activeStep === SOURCE_STEP + 1 ? !customPromptError : true;
-  const completedSteps = STEPS.map((_, index) => {
-    if (index === SOURCE_STEP) return Boolean(metadata);
-    if (index === RENDER_STEP) return Boolean(job.result?.success);
-    return index < activeStep;
-  });
-  const goToStep = (index: number) => {
-    setActiveStep(Math.min(Math.max(index, SOURCE_STEP), RENDER_STEP));
-  };
-  const goNext = () => {
-    if (canContinue) goToStep(activeStep + 1);
-  };
+  const modeSummary = editStrategy === "full" ? "Keep the full recording"
+    : editStrategy === "highlights" ? `AI highlight · about ${highlightTarget}s · ${selectedAgent}`
+    : `Keep the story${removeSilence ? " · remove long pauses" : ""}${removeRetakes ? " · keep later retakes" : ""}`;
+  const editSummary = `${modeSummary}${customInstructionsEnabled && promptHook.trim() ? " · Custom instructions" : ""}`;
+  const canRender = Boolean(isTauri() && metadata && inputPath.trim() && outputPath.trim() && !isProbing);
+  const hasCompletedOutput = Boolean(latestCompletedOutput(inputPath, renderHistory) || (job.result?.success && job.inputVideo === inputPath));
 
   const selectedPresetName =
     PRESETS.find((p) => p.id === selectedPreset)?.name ?? selectedPreset;
@@ -1572,83 +1676,78 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
   const renderPreflightRow = (
     label: string,
     value: string,
-    stepIndex: number,
+    sectionId: string,
   ) => (
     <div className="flex items-center justify-between gap-3 py-2">
       <div className="min-w-0">
         <div className="text-xs text-muted">{label}</div>
-        <div className="truncate text-sm font-medium text-foreground">
+        <div className="truncate text-sm font-medium text-foreground" title={value}>
           {value}
         </div>
       </div>
-      <Button variant="ghost" size="sm" onClick={() => goToStep(stepIndex)}>
+      <Button variant="ghost" size="sm" aria-label={`Edit ${label.toLowerCase()}`} disabled={!metadata && sectionId !== "studio-source"} onClick={() => scrollToSection(sectionId)}>
         Edit
       </Button>
     </div>
   );
 
+  const editingModelSelector = (allowAutomatic = false) => (
+    <Select variant="secondary" fullWidth selectedKey={!allowAutomatic && selectedAgent === AUTO_CUT_AGENT_ID ? null : selectedAgent}
+      onSelectionChange={key => { if (key) setSelectedAgent(String(key)); }}
+      placeholder="Choose a local CLI"
+      disabledKeys={AGENTS.filter(agent => agentProbe[agent.id]?.available === false).map(agent => agent.id)}>
+      <Label>{allowAutomatic ? "Clip finder" : "AI editing CLI"}</Label><Select.Trigger><Select.Value /><Select.Indicator /></Select.Trigger>
+      <Select.Popover><ListBox>{AGENTS.filter(agent => allowAutomatic || agent.id !== AUTO_CUT_AGENT_ID).map(agent =>
+        <ListBox.Item key={agent.id} id={agent.id} textValue={agent.name}>{agent.name}</ListBox.Item>)}</ListBox></Select.Popover>
+    </Select>
+  );
+  const stageIndex = STUDIO_STAGES.findIndex(stage => stage.id === activeStage);
+  const stage = STUDIO_STAGES[stageIndex];
+  const preview = metadata && inputPath ? <VideoPreview inputPath={inputPath}
+    completedOutput={latestCompletedOutput(inputPath, renderHistory)}
+    completedVersion={renderHistory.find(entry => entry.inputVideo === inputPath && entry.status === "completed")?.id ?? ""}
+    jobOutput={job.result?.success && job.inputVideo === inputPath ? job.outputVideo : null}
+    jobVersion={job.jobId ?? ""}
+    onOpenFile={onOpenFile} onReveal={onOpenFileLocation} /> : null;
+
   return (
-    <div className="space-y-6">
+    <div className="studio-workspace space-y-5" id="studio-workspace">
       {/* Page header — draft name + file status, primary actions */}
       <PageHeader
-        eyebrow="Studio"
-        title={fileName || "New short"}
-        description={
-          metadata
-            ? `${metadata.width}×${metadata.height} · ${metadata.duration_seconds}s · ${metadata.fps} fps`
-            : "Import a video or paste a stream link to begin"
-        }
+        eyebrow={<span className="inline-flex items-center gap-1.5"><Monitor className="size-3.5" /> Studio · Local rendering</span>}
+        title={fileName || "Create your next short"}
+        description={metadata ? `${formatClipTime(metadata.duration_seconds)} · ${metadata.width} × ${metadata.height} · Draft saved on this computer` : "From your recording to a finished video, one simple step at a time."}
         actions={
-          <>
           <Button
-            variant="secondary"
+            variant={metadata ? "secondary" : "primary"}
             icon={<FolderOpen />}
             onClick={handleBrowseFile}
+            disabled={job.isRunning}
           >
             {inputPath ? "Change video" : "Import video"}
           </Button>
-          {activeStep === RENDER_STEP ? (
-            <Button
-              variant="primary"
-              isLoading={job.isRunning}
-              disabled={job.isRunning || !canRender}
-              icon={<Play />}
-              onClick={handleRender}
-            >
-              Render short
-            </Button>
-          ) : (
-            <Button
-              variant="primary"
-              icon={<ChevronRight />}
-              onClick={goNext}
-              disabled={!canContinue}
-            >
-              Continue
-            </Button>
-          )}
-          </>
         }
       />
 
-      <div className="border-b border-separator pb-4">
-        <StudioStepper
-          steps={STEPS}
-          activeIndex={activeStep}
-          completed={completedSteps}
-          onSelect={goToStep}
-        />
+      <StudioNavigation active={activeStage} hasVideo={Boolean(metadata)}
+        hasJobs={job.status !== "idle" || renderHistory.length > 0} onChange={goToStage} />
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="mb-1 text-xs font-medium text-muted">STEP {stageIndex + 1} OF {STUDIO_STAGES.length}</p>
+          <h2 ref={stageHeadingRef} tabIndex={-1} className="text-xl font-semibold text-foreground outline-none">{stage.title}</h2>
+          <p className="mt-1 max-w-2xl text-sm leading-relaxed text-muted">{stage.description}</p>
+        </div>
+        {seoBusy && <span role="status" className="flex items-center gap-2 text-xs text-muted"><Spinner size="sm" /> Analyzing your video</span>}
       </div>
-
-      {/* Active step */}
-      <div className="min-w-0">
-          {activeStep === 0 && (
-            <div className="space-y-5">
+      {!isTauri() && <div className="rounded-xl border border-border bg-surface p-3 text-sm text-muted">Browser preview · Open the desktop app to import videos and run your local editing tools.</div>}
+      <div className={`studio-work-area ${metadata ? "studio-work-area--with-preview" : ""}`}>
+      <div className="studio-controls min-w-0">
+          <section id="studio-source" hidden={activeStage !== "source"} aria-label="Video source" className="studio-panel space-y-5">
               {/* Two ways in, side by side at equal height. */}
-              <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
+              <div className="studio-source-options grid grid-cols-1 gap-5">
               <SectionCard
                 title="Video file"
-                description={metadata ? "Probed and ready" : "Drop a file or browse"}
+                description={metadata ? "Ready to edit" : "Drop a file or browse"}
                 contentClassName="flex flex-col"
               >
                 <div
@@ -1663,7 +1762,7 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
                     inputPath
                       ? undefined
                       : (e) => {
-                          if (e.key === "Enter") handleBrowseFile();
+                          if (e.key === "Enter" || e.key === " ") { e.preventDefault(); void handleBrowseFile(); }
                         }
                   }
                   className={`rounded-lg transition-colors ${
@@ -1742,19 +1841,8 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
                       {isProbing && (
                         <div className="flex items-center justify-center gap-2 py-1 text-xs text-muted">
                           <Spinner size="sm" color="current" />
-                          Probing streams…
+                          Reading your video…
                         </div>
-                      )}
-
-                      {probeError && (
-                        <Alert status="danger">
-                          <Alert.Indicator>
-                            <AlertCircle className="size-4" />
-                          </Alert.Indicator>
-                          <Alert.Content>
-                            <Alert.Description>{probeError}</Alert.Description>
-                          </Alert.Content>
-                        </Alert>
                       )}
                     </div>
                   )}
@@ -1814,7 +1902,7 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
                       className="shrink-0"
                       icon={<Sparkles />}
                       isLoading={streamAnalyzing}
-                      disabled={streamAnalyzing || !streamUrl.trim() || Boolean(customPromptError)}
+                      disabled={streamAnalyzing || streamWatching || !streamUrl.trim() || !isTauri()}
                       onClick={handleStreamAnalyze}
                     >
                       Find clips
@@ -1857,13 +1945,10 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
                             <button
                               type="button"
                               aria-label={`Forget ${title}`}
-                              title="Forget this stream"
-                              onClick={() =>
-                                onStreamRunsChange(
-                                  removeStreamRun(streamRuns, recentUrl),
-                                )
-                              }
-                              className="shrink-0 rounded px-0.5 hover:text-danger"
+                              disabled={streamAnalysisJobs[recentUrl]?.status === "running"}
+                              title={streamAnalysisJobs[recentUrl]?.status === "running" ? "Clip finding is running" : "Forget this stream"}
+                              onClick={() => forgetStream(recentUrl)}
+                              className="shrink-0 rounded px-0.5 hover:text-danger disabled:cursor-not-allowed disabled:opacity-30"
                             >
                               <X className="size-3" />
                             </button>
@@ -1897,8 +1982,13 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
                           </div>
                         ) : (
                           <>
-                            <div className="truncate text-sm font-semibold text-foreground">
-                              {streamProbe?.title}
+                            <div className="flex items-center gap-2 truncate text-sm font-semibold text-foreground">
+                              {streamProbe?.is_live && (
+                                <span className="shrink-0 rounded-[4px] bg-danger/15 px-1.5 py-0.5 text-[10px] font-semibold tracking-wide text-danger">
+                                  LIVE
+                                </span>
+                              )}
+                              <span className="truncate">{streamProbe?.title}</span>
                             </div>
                             <div className="truncate text-xs text-muted">
                               {[
@@ -1919,27 +2009,44 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
                   )}
 
                   {streamAnalyzing && (
-                    <div className="flex items-center justify-center gap-2 py-2 text-xs text-muted">
-                      <Spinner size="sm" color="current" />
-                      Fetching captions & scoring moments…
+                    <div role="status" className="space-y-2 rounded-lg border border-accent/20 bg-accent/5 p-3">
+                      <div className="flex items-center gap-2 text-sm font-medium">
+                        <Spinner size="sm" color="current" /> Finding the best moments
+                      </div>
+                      <LinearProgress label="Finding clips" />
+                      <p className="text-xs leading-relaxed text-muted">Reading captions or transcribing audio, then selecting clips. Long videos may take several minutes.</p>
                     </div>
                   )}
 
-                  {streamError && (
-                    <Alert status="danger">
-                      <Alert.Indicator>
-                        <AlertCircle className="size-4" />
-                      </Alert.Indicator>
-                      <Alert.Content>
-                        <Alert.Description>{streamError}</Alert.Description>
-                      </Alert.Content>
-                    </Alert>
+                  {streamWatching && !streamAnalyzing && (
+                    <div role="status" className="space-y-2 rounded-lg border border-danger/20 bg-danger/5 p-3">
+                      <div className="flex items-center gap-2 text-sm font-medium">
+                        <span className="relative flex size-2 shrink-0">
+                          <span className="absolute inline-flex size-full animate-ping rounded-full bg-danger opacity-60" />
+                          <span className="relative inline-flex size-2 rounded-full bg-danger" />
+                        </span>
+                        Waiting for the replay
+                      </div>
+                      <p className="text-xs leading-relaxed text-muted">
+                        This stream is live. Clip finding starts when the VOD is ready.
+                      </p>
+                      {onStopWatchingStream && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          disabled={streamJob?.status === "running"}
+                          onClick={() => onStopWatchingStream(streamUrl.trim())}
+                        >
+                          Stop waiting
+                        </Button>
+                      )}
+                    </div>
                   )}
 
-                  <p className="mt-auto border-t border-separator pt-3 text-xs leading-snug text-muted">
-                    Clip picking uses the Style editing model with standard
-                    length — tune the model, format, and framing in Style.
-                  </p>
+                  <div className="mt-auto space-y-2 border-t border-separator pt-3">
+                    {editingModelSelector(true)}
+                    <p className="text-xs leading-relaxed text-muted">Auto cut uses local scoring; a CLI can plan the moments with AI. Import the clips you want, then adjust their edit and framing.</p>
+                  </div>
                 </div>
               </SectionCard>
               </div>
@@ -2101,28 +2208,78 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
                         className="w-full"
                       >
                         {streamImporting
-                          ? "Importing clips…"
+                          ? streamImportProgress
+                            ? `Importing clip ${streamImportProgress.current} of ${streamImportProgress.total}…`
+                            : "Importing clips…"
                           : `Import ${streamSelected.length} clip${streamSelected.length === 1 ? "" : "s"} as source${streamSelected.length === 1 ? "" : "s"}`}
                       </Button>
                     )}
                     <p className="text-xs leading-relaxed text-muted">
                       Only the winning windows are downloaded — never the
-                      full video. Imported clips become sidebar sources:
-                      open each one and walk it through Style, Captions,
-                      Metadata, and Render like any uploaded video.
+                      full video. Each clip is fetched on its own, so a
+                      failed window is skipped and the rest still become
+                      sidebar sources. Open each one to edit and render it
+                      like any uploaded video.
                     </p>
                   </div>
                 </SectionCard>
               )}
-            </div>
-          )}
+          </section>
 
-          {activeStep === 1 && (
-            /* Look + format side by side (rows stretch to one height),
-               editing model full width below with its two fields paired. */
-            <div className="grid grid-cols-1 gap-5 xl:grid-cols-2">
+          {metadata && (
+            /* Automation first, then the output look and framing. */
+            <section id="studio-edit" hidden={activeStage !== "edit"} aria-label="Edit and format" className="studio-panel grid grid-cols-1 gap-5">
+              <SectionCard title="How would you like to edit?" description="Start with a mode. Fine-tune the details below.">
+                <div className="space-y-4">
+                  <div className="studio-edit-modes grid gap-3" role="group" aria-label="Editing mode">
+                    {([
+                      ["cleanup", "Clean up", "Remove pauses & repeated takes"],
+                      ["highlights", "AI highlight", "Find a focused moment"],
+                      ["full", "Keep full video", "Style without cutting"],
+
+                    ] as const).map(([value, label, description]) => <button key={value} type="button"
+                      aria-pressed={editStrategy === value} onClick={() => setEditStrategy(value)}
+                      className={`studio-choice ${editStrategy === value ? "studio-choice--selected" : ""}`}>
+                      <span className="flex items-center justify-between gap-2 font-medium">{label}{editStrategy === value && <Check className="size-4 shrink-0 text-accent" />}</span>
+                      <span className="mt-1 block text-xs leading-relaxed text-muted">{description}</span>
+                    </button>)}
+                  </div>
+                  <p className="text-sm text-muted">{editStrategy === "cleanup"
+                    ? "Keep your complete story. Remove long pauses and earlier repeated takes without a fixed time limit."
+                    : editStrategy === "highlights" ? `Let an editing model choose a focused short up to ${highlightTarget} seconds, with a clear opening and ending. If the source already fits, it may keep the same content as Clean up.`
+                    : "Keep all footage and apply your color, framing, and caption settings. Optional instructions can request specific cuts."}</p>
+                  {(editStrategy === "cleanup" || editStrategy === "highlights") && <div className="studio-cleanup-options grid gap-x-5 gap-y-3">
+                    <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={removeSilence}
+                      onChange={e => setRemoveSilence(e.target.checked)} />Remove long pauses</label>
+                    <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={removeRetakes}
+                      onChange={e => setRemoveRetakes(e.target.checked)} />Keep the later repeated take</label>
+                  </div>}
+                  <div className="space-y-4 border-t border-separator pt-4">
+                    {editingModelSelector()}
+                    {editStrategy === "highlights" && <Field label="Target length">
+                      <Segmented label="Highlight length" value={String(highlightTarget)} onChange={value => setHighlightTarget(Number(value))}
+                        options={[{ value: "30", label: "30s" }, { value: "60", label: "60s" }, { value: "90", label: "90s" }]} />
+                    </Field>}
+                    <div className="space-y-3 rounded-xl border border-border p-3">
+                      <Switch isSelected={customInstructionsEnabled} onChange={setCustomInstructionsEnabled} aria-label="Add custom instructions">
+                        <Switch.Content>
+                          <Switch.Control><Switch.Thumb /></Switch.Control>
+                          <Label>Add custom instructions</Label>
+                        </Switch.Content>
+                      </Switch>
+                      <p className="text-xs leading-relaxed text-muted">Optional guidance for this edit. You can use it with any editing mode.</p>
+                      {customInstructionsEnabled && <Field label="Your instructions" hint={`${promptHook.length}/4,000 characters · Saved even when switched off`}>
+                        <TextArea rows={5} value={promptHook} maxLength={4000} onChange={event => setPromptHook(event.target.value)}
+                          aria-label="Custom editing instructions" placeholder="For example: Keep the full explanation, cut the false starts, and use https://www.youtube.com/watch?v=… as a pacing reference." />
+                        <p className="mt-2 text-xs leading-relaxed text-muted">YouTube links are read as caption references for the opening, topic and pacing. They do not insert footage from another video. Leave this blank to use the selected mode on its own.</p>
+                      </Field>}
+                    </div>
+                    <p className="text-xs leading-relaxed text-muted">{usesEditingAgent ? "Uses your selected CLI for AI planning; video rendering runs on your computer." : "Clean up and Keep full video run locally without AI unless you add instructions. Your AI selection is saved for when it’s needed."}</p>
+                  </div>
+                </div>
+              </SectionCard>
               <SectionCard title="Color grade" description="Look applied to the whole short">
-                <div className="grid grid-cols-2 items-stretch gap-2" role="radiogroup" aria-label="Color grade">
+                <div className="studio-grade-options grid items-stretch gap-3" role="radiogroup" aria-label="Color grade">
                   {PRESETS.map((preset) => {
                     const isSelected = selectedPreset === preset.id;
                     return (
@@ -2217,95 +2374,11 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
                 </div>
               </SectionCard>
 
-              <SectionCard
-                className="xl:col-span-2"
-                title="Editing prompt"
-                description="Guide this short with your own prompt and YouTube references"
-              >
-                {/* xl gap = card gap (20) + both cards' padding (2×16), so the
-                    two fields line up with the cards above. */}
-                <div className="grid grid-cols-1 items-start gap-x-4 gap-y-3 md:grid-cols-2 xl:gap-x-[52px]">
-                  <Select
-                    variant="secondary"
-                    fullWidth
-                    selectedKey={selectedAgent}
-                    onSelectionChange={(key) => setSelectedAgent(String(key))}
-                    disabledKeys={AGENTS.filter((agent) => {
-                      const probe =
-                        agent.id === AUTO_CUT_AGENT_ID
-                          ? autoCutProbe()
-                          : agentProbe[agent.id];
-                      return reviewModelOption(agent, {
-                        available: probe ? probe.available : null,
-                        probing: probingAgents,
-                      }).disabled;
-                    }).map((agent) => agent.id)}
-                  >
-                    <Label>Editing model</Label>
-                    <Select.Trigger>
-                      <Select.Value />
-                      <Select.Indicator />
-                    </Select.Trigger>
-                    <Select.Popover>
-                      <ListBox>
-                      {AGENTS.map((agent) => {
-                        const probe =
-                          agent.id === AUTO_CUT_AGENT_ID
-                            ? autoCutProbe()
-                            : agentProbe[agent.id];
-                        const row = reviewModelOption(agent, {
-                          available: probe ? probe.available : null,
-                          probing: probingAgents,
-                        });
-                        return (
-                          <ListBox.Item
-                            key={row.value}
-                            id={row.value}
-                            textValue={row.label}
-                          >
-                            {row.label}
-                          </ListBox.Item>
-                        );
-                      })}
-                      </ListBox>
-                    </Select.Popover>
-                  </Select>
-                  <p className="text-xs leading-snug text-muted md:col-span-2">
-                    Video rendering stays local. Editing models send the transcript and
-                    channel context to their configured AI provider; Auto cut stays local.
-                  </p>
-                  {selectedAgent === AUTO_CUT_AGENT_ID && (
-                    <p className="text-xs leading-snug text-muted md:order-last md:col-span-2">
-                      Auto cut uses the opening section. Choose an available
-                      editing model to apply a custom prompt.
-                    </p>
-                  )}
-                  <Field
-                    label="Custom prompt"
-                    hint="Describe the hook, topic, and pacing. Paste a full YouTube video link to use its captions and spoken timing as a reference."
-                  >
-                    <TextArea
-                      value={promptHook}
-                      onChange={(e) => setPromptHook(e.target.value)}
-                      rows={4}
-                      maxLength={4000}
-                      placeholder="Open on my demo, skip the introduction, and build toward the result. Use this video's spoken hook and pacing as a reference: https://www.youtube.com/watch?v=…"
-                    />
-                  </Field>
-                  <p className="text-xs leading-snug text-muted md:col-span-2">
-                    References guide cuts from your source video. They need public
-                    English captions. Set framing and captions in their panels;
-                    reference footage and visual effects are not inserted by this prompt.
-                    {customPromptError && (
-                      <span role="alert" className="mt-2 block text-danger">{customPromptError}</span>
-                    )}
-                  </p>
-                </div>
-              </SectionCard>
-            </div>
+            </section>
           )}
 
-          {activeStep === 2 && (
+          {metadata && (
+            <section id="studio-captions" hidden={activeStage !== "captions"} aria-label="Captions" className="studio-panel">
             <SubtitleStudio
               selectedTheme={subtitleStyle}
               onSelectTheme={setSubtitleStyle}
@@ -2318,17 +2391,204 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
               burnInCaptions={burnInCaptions}
               onToggleBurnInCaptions={setBurnInCaptions}
               videoTitle={seoTitle || fileName}
+              aspectRatio={aspectRatio}
+              isActive={activeStage === "captions"}
             />
+            </section>
           )}
 
-          {activeStep === 3 && (
-            <div className="grid grid-cols-1 items-start gap-5 lg:grid-cols-12">
-            <div className="min-w-0 space-y-5 lg:order-2 lg:col-span-5">
+          {metadata && (
+            <section id="studio-title" hidden={activeStage !== "title"} aria-label="Title and tags" className="studio-panel flex flex-col gap-5">
+              <div className="min-w-0 space-y-5">
+              <SectionCard
+              title="Title & description"
+                  description={
+                    seoMetadata
+                      ? "Saved with the exported video"
+                      : "Write your own details or generate them from speech"
+                  }
+                  actions={
+                    <>
+                      <Button
+                        variant="ghost"
+                        icon={
+                          copiedSection === "all" ? <Check /> : <Copy />
+                        }
+                        onClick={handleCopyAllMetadata}
+                        title="Copy full title, description and tags bundle"
+                      >
+                        {copiedSection === "all" ? "Copied" : "Copy all"}
+                      </Button>
+                      {onSendToSocial && (
+                        <Button
+                          variant="primary"
+                          icon={<Share2 />}
+                          disabled={!hasCompletedOutput}
+                          title={!hasCompletedOutput ? "Export your video before sending it to Social" : undefined}
+                          onClick={() =>
+                            onSendToSocial(playableOutput, {
+                              title: seoTitle,
+                              description: seoDescription,
+                              tags: seoTags,
+                            })
+                          }
+                        >
+                          Send to Social
+                        </Button>
+                      )}
+                    </>
+                  }
+                >
+                  <div className="space-y-4">
+                    <Field
+                      label={
+                        <span className="flex items-center gap-1.5">
+                          Video title
+                          <span className="font-normal text-muted">
+                            ({seoTitle.length}/100)
+                          </span>
+                        </span>
+                      }
+                      hint={titleFeedHint(seoTitle)}
+                      action={
+                        <Button
+                          variant="ghost"
+                          icon={
+                            copiedSection === "title" ? <Check /> : <Copy />
+                          }
+                          onClick={() => handleCopyText(seoTitle, "title")}
+                        >
+                          {copiedSection === "title" ? "Copied" : "Copy"}
+                        </Button>
+                      }
+                    >
+                      <TextInput
+                        value={seoTitle}
+                        onChange={(e) => setSeoTitle(e.target.value)}
+                        aria-label="Video title"
+                      />
+                    </Field>
+
+                    {seoMetadata?.title_alternatives &&
+                      seoMetadata.title_alternatives.filter((t) => t !== seoTitle)
+                        .length > 0 && (
+                        <div className="flex flex-col gap-1.5">
+                          {seoMetadata.title_alternatives
+                            .filter((t) => t !== seoTitle)
+                            .slice(0, 4)
+                            .map((t) => (
+                              <button
+                                key={t}
+                                type="button"
+                                onClick={() => setSeoTitle(t)}
+                                title="Use this title"
+                                className="w-full whitespace-normal break-words rounded-lg border border-border bg-surface-secondary/60 px-2 py-1.5 text-left text-xs text-muted transition-colors hover:border-accent hover:text-foreground"
+                              >
+                                {t}
+                              </button>
+                            ))}
+                        </div>
+                      )}
+
+                    <Field
+                      label="Description"
+                      action={
+                        <Button
+                          variant="ghost"
+                          icon={
+                            copiedSection === "desc" ? <Check /> : <Copy />
+                          }
+                          onClick={() =>
+                            handleCopyText(seoDescription, "desc")
+                          }
+                        >
+                          {copiedSection === "desc" ? "Copied" : "Copy"}
+                        </Button>
+                      }
+                    >
+                      <TextArea
+                        rows={4}
+                        value={seoDescription}
+                        onChange={(e) => setSeoDescription(e.target.value)}
+                        aria-label="Video description"
+                      />
+                    </Field>
+
+                    <Field
+                      label={
+                        <span className="flex items-center gap-1.5">
+                          <Tag className="size-3.5 text-muted" />
+                          Search tags ({seoTags.length} ·{" "}
+                          {seoTags.join(", ").length}/500)
+                        </span>
+                      }
+                      action={
+                        <Button
+                          variant="ghost"
+                          icon={
+                            copiedSection === "tags" ? <Check /> : <Copy />
+                          }
+                          onClick={() =>
+                            handleCopyText(seoTags.join(", "), "tags")
+                          }
+                        >
+                          {copiedSection === "tags" ? "Copied" : "Copy"}
+                        </Button>
+                      }
+                    >
+                      {renderTagEditor()}
+                    </Field>
+                    <Field
+                      label="Pinned comment"
+                      hint="Posted and pinned on YouTube with the upload — a question gets replies"
+                    >
+                      <TextArea
+                        rows={2}
+                        value={pinnedComment}
+                        onChange={(e) => setPinnedComment(e.target.value)}
+                        placeholder="e.g. Which pool crate do you use?"
+                        aria-label="Pinned first comment"
+                      />
+                    </Field>
+                    <SeoChecklist
+                      title={seoTitle}
+                      description={seoDescription}
+                      tags={seoTags}
+                      hashtags={normalizeHashtags(
+                        seoTags,
+                        seoMetadata?.hashtags ?? [],
+                      )}
+                      keywords={queryTargets.keywords}
+                      queries={queryTargets.queries}
+                      hook={reviewReport?.hook_detected ?? ""}
+                      retention={seoMetadata?.seo_score ?? 0}
+                      engineQuality={seoMetadata?.quality_score ?? null}
+                    />
+                    {!seoMetadata && !seoBusy && (
+                      <p className="text-xs leading-snug text-muted">
+                        No AI analysis yet — titles, tags, and the review
+                        summary appear here once your transcript is
+                        analyzed. Use Re-analyze in the review summary below.
+                      </p>
+                    )}
+                  </div>
+                </SectionCard>
+              </div>
+            <div className="min-w-0 space-y-5">
             <SectionCard
             title="Review summary"
                 description={
-                  seoMetadata?.seo_score
-                    ? `SEO score ${seoMetadata.seo_score}`
+                  seoMetadata
+                    ? [
+                        typeof seoMetadata.quality_score === "number"
+                          ? `Package ${seoMetadata.quality_score}/100`
+                          : null,
+                        seoMetadata.seo_score
+                          ? `retention ${seoMetadata.seo_score}/100`
+                          : null,
+                      ]
+                        .filter(Boolean)
+                        .join(" · ") || "Whole-video analysis"
                     : "Whole-video analysis"
                 }
                 actions={
@@ -2416,7 +2676,7 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
                   <EmptyState
                     icon={<Sparkles className="size-5" />}
                     title="No review yet"
-                    description="Import footage to auto-analyze dialogue, pacing and hooks."
+                    description="Use Re-analyze to review this video’s dialogue, pacing and hooks."
                   />
                 )}
               </SectionCard>
@@ -2511,223 +2771,57 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
                         );
                       })}
                     </div>
-                  ) : trending ? (
-                    <p className="text-xs leading-snug text-muted">
-                      {trending.error ??
-                        trending.note ??
-                        "No trending terms found."}{" "}
-                      {!youtubeKey &&
-                        "Add a YouTube Data API key in Settings → API keys."}
-                    </p>
                   ) : (
                     <p className="text-xs leading-snug text-muted">
-                      Fetch what high-view Shorts in your niche are titled,
-                      then tap a term to boost your tags.
+                      Fetch what fast-rising Shorts in your niche are titled
+                      and what people search, then tap a term to add it.
+                      Analysis also uses them automatically for a week.
                     </p>
+                  )}
+                  {trending?.queries && trending.queries.length > 0 && (
+                    <div className="space-y-1.5">
+                      <p className="text-xs text-muted">People search</p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {trending.queries.slice(0, 10).map((q) => {
+                          const added = seoTags.includes(q.toLowerCase());
+                          return (
+                            <button
+                              key={q}
+                              type="button"
+                              disabled={added}
+                              onClick={() => handleAddTrendingTerm(q)}
+                              title={added ? "Already in tags" : `Add "${q}" to tags`}
+                              className={`flex items-center gap-1 rounded-lg border px-2 py-1 text-xs transition-colors ${
+                                added
+                                  ? "cursor-default border-border text-muted opacity-60"
+                                  : "border-border bg-surface-secondary/60 text-muted hover:border-accent hover:text-foreground"
+                              }`}
+                            >
+                              {added ? (
+                                <Check className="size-3" strokeWidth={3} />
+                              ) : (
+                                <Search className="size-3" strokeWidth={3} />
+                              )}
+                              {q}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
                   )}
                 </div>
               </SectionCard>
               </div>
 
-              <div className="min-w-0 space-y-5 lg:order-1 lg:col-span-7">
-              <SectionCard
-              title="Title & description"
-                  description={
-                    seoMetadata
-                      ? "Metadata burned into the render"
-                      : "Import footage to generate from your transcript"
-                  }
-                  actions={
-                    <>
-                      <Button
-                        variant="ghost"
-                        icon={
-                          copiedSection === "all" ? <Check /> : <Copy />
-                        }
-                        onClick={handleCopyAllMetadata}
-                        title="Copy full title, description and tags bundle"
-                      >
-                        {copiedSection === "all" ? "Copied" : "Copy all"}
-                      </Button>
-                      {onSendToSocial && (
-                        <Button
-                          variant="primary"
-                          icon={<Share2 />}
-                          onClick={() =>
-                            onSendToSocial(playableOutput, {
-                              title: seoTitle,
-                              description: seoDescription,
-                              tags: seoTags,
-                            })
-                          }
-                        >
-                          Send to Social
-                        </Button>
-                      )}
-                    </>
-                  }
-                >
-                  <div className="space-y-4">
-                    <Field
-                      label={
-                        <span className="flex items-center gap-1.5">
-                          Video title
-                          <span className="font-normal text-muted">
-                            ({seoTitle.length}/100)
-                          </span>
-                        </span>
-                      }
-                      hint="Names the rendered file too, unless you override it in Render."
-                      action={
-                        <Button
-                          variant="ghost"
-                          icon={
-                            copiedSection === "title" ? <Check /> : <Copy />
-                          }
-                          onClick={() => handleCopyText(seoTitle, "title")}
-                        >
-                          {copiedSection === "title" ? "Copied" : "Copy"}
-                        </Button>
-                      }
-                    >
-                      <TextInput
-                        value={seoTitle}
-                        onChange={(e) => setSeoTitle(e.target.value)}
-                        aria-label="Video title"
-                      />
-                    </Field>
-
-                    {seoMetadata?.title_alternatives &&
-                      seoMetadata.title_alternatives.filter((t) => t !== seoTitle)
-                        .length > 0 && (
-                        <div className="flex flex-wrap gap-1.5">
-                          {seoMetadata.title_alternatives
-                            .filter((t) => t !== seoTitle)
-                            .slice(0, 4)
-                            .map((t) => (
-                              <button
-                                key={t}
-                                type="button"
-                                onClick={() => setSeoTitle(t)}
-                                title="Use this title"
-                                className="max-w-full truncate rounded-lg border border-border bg-surface-secondary/60 px-2 py-1 text-left text-xs text-muted transition-colors hover:border-accent hover:text-foreground"
-                              >
-                                {t}
-                              </button>
-                            ))}
-                        </div>
-                      )}
-
-                    <Field
-                      label="Description"
-                      action={
-                        <Button
-                          variant="ghost"
-                          icon={
-                            copiedSection === "desc" ? <Check /> : <Copy />
-                          }
-                          onClick={() =>
-                            handleCopyText(seoDescription, "desc")
-                          }
-                        >
-                          {copiedSection === "desc" ? "Copied" : "Copy"}
-                        </Button>
-                      }
-                    >
-                      <TextArea
-                        rows={4}
-                        value={seoDescription}
-                        onChange={(e) => setSeoDescription(e.target.value)}
-                        aria-label="Video description"
-                      />
-                    </Field>
-
-                    <Field
-                      label={
-                        <span className="flex items-center gap-1.5">
-                          <Tag className="size-3.5 text-muted" />
-                          Search tags ({seoTags.length} ·{" "}
-                          {seoTags.join(", ").length}/500)
-                        </span>
-                      }
-                      action={
-                        <Button
-                          variant="ghost"
-                          icon={
-                            copiedSection === "tags" ? <Check /> : <Copy />
-                          }
-                          onClick={() =>
-                            handleCopyText(seoTags.join(", "), "tags")
-                          }
-                        >
-                          {copiedSection === "tags" ? "Copied" : "Copy"}
-                        </Button>
-                      }
-                    >
-                      {renderTagEditor()}
-                    </Field>
-                    <SeoChecklist
-                      title={seoTitle}
-                      description={seoDescription}
-                      tags={seoTags}
-                      hashtags={normalizeHashtags(
-                        seoTags,
-                        seoMetadata?.hashtags ?? [],
-                      )}
-                      keywords={
-                        seoMetadata?.keywords_analyzed ?? []
-                      }
-                      retention={seoMetadata?.seo_score ?? 0}
-                      engineQuality={seoMetadata?.quality_score ?? null}
-                    />
-                    {!seoMetadata && !seoBusy && (
-                      <p className="text-xs leading-snug text-muted">
-                        No AI analysis yet — titles, tags, and the review
-                        summary appear here once your transcript is
-                        analyzed. Hit Re-analyze above.
-                      </p>
-                    )}
-                  </div>
-                </SectionCard>
-              </div>
-            </div>
+            </section>
           )}
 
-          {activeStep === 4 && (
-            <div className="grid grid-cols-1 items-start gap-5 lg:grid-cols-12">
-            <div className="min-w-0 space-y-5 lg:col-span-5">
+          {(metadata || job.status !== "idle" || renderHistory.length > 0) && (
+            <section id="studio-render" hidden={activeStage !== "render"} aria-label="Export" className="studio-panel space-y-5">
+            <div className="min-w-0 space-y-5">
             <SectionCard
-            title="Preflight"
-                description="Review before rendering"
-                footer={
-                  job.isRunning ? (
-                    <Button
-                      variant="secondary"
-                      fullWidth
-                      size="md"
-                      icon={<Square />}
-                      onClick={() => job.cancel()}
-                    >
-                      Cancel render
-                    </Button>
-                  ) : (
-                    <Button
-                      variant="primary"
-                      fullWidth
-                      size="md"
-                      disabled={!canRender}
-                      icon={<Play />}
-                      onClick={handleRender}
-                      title={
-                        !canRender
-                          ? customPromptError || "Import footage and set an output file first"
-                          : undefined
-                      }
-                    >
-                      Render short
-                    </Button>
-                  )
-                }
+            title="Export settings"
+                description="Your finished MP4 will be saved here."
               >
                 <Field
                   label="Output file"
@@ -2778,35 +2872,37 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
                   {renderPreflightRow(
                     "Source",
                     fileName || "No footage imported",
-                    SOURCE_STEP,
+                    "studio-source",
                   )}
                   {renderPreflightRow(
-                    "Style",
-                    `${selectedPresetName} · ${selectedAgentName} · ${aspectRatio} · ${streamLayout}`,
-                    1,
+                    "Cuts & duration",
+                    editSummary,
+                    "studio-edit",
                   )}
-                  {promptHook.trim() && renderPreflightRow(
-                    "Custom prompt",
-                    promptHook.trim(),
-                    1,
+                  {customInstructionsEnabled && promptHook.trim() && renderPreflightRow("Instructions", promptHook, "studio-edit")}
+                  {usesEditingAgent && renderPreflightRow("AI editing CLI", selectedAgentName, "studio-edit")}
+                  {renderPreflightRow(
+                    "Style",
+                    `${selectedPresetName} · ${usesEditingAgent ? selectedAgentName : "Automatic edit"} · ${aspectRatio} · ${streamLayout}`,
+                    "studio-edit",
                   )}
                   {renderPreflightRow(
                     "Captions",
                     burnInCaptions
                       ? `${subtitleStyle} · ${subtitlePosition} · ${subtitleSize}`
                       : `Disabled — clean ${aspectRatio} crop`,
-                    2,
+                    "studio-captions",
                   )}
                   {renderPreflightRow(
                     "Title",
                     seoTitle || "Untitled",
-                    3,
+                    "studio-title",
                   )}
                 </div>
               </SectionCard>
               </div>
 
-              <div className="min-w-0 space-y-5 lg:col-span-7">
+              <div className="min-w-0 space-y-5">
               <SectionCard
               title="Render output"
                 description={
@@ -2816,18 +2912,25 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
                       ? "Pipeline finished"
                       : job.status === "cancelled"
                         ? "Pipeline cancelled"
-                        : "Logs appear here"
+                        : hasCompletedOutput ? "Saved on this computer" : "Ready to export"
                 }
               >
                 {job.status === "idle" ? (
-                  <EmptyState
-                    icon={<Film className="size-5" />}
-                    title="Ready when you are"
-                    description="Check the preflight summary, then press “Render short” to run the pipeline in the background. Live logs will appear here."
-                  />
+                  <div className="space-y-3">
+                    <EmptyState
+                      icon={hasCompletedOutput ? <CheckCircle2 className="size-5 text-success" /> : <Film className="size-5" />}
+                      title={hasCompletedOutput ? "Your latest export is ready" : "Ready when you are"}
+                      description={hasCompletedOutput ? "Preview the finished video, or send it to Social when you’re ready to publish." : "Choose Export video below. Progress and any messages from your local tools will appear here."}
+                    />
+                    {hasCompletedOutput && <div className="flex flex-wrap justify-end gap-2">
+                      <Button variant="secondary" icon={<Play />} onClick={() => onOpenFile(playableOutput)}>Play video</Button>
+                      {onQueueOutput && <Button variant="secondary" icon={<Plus />} onClick={() => onQueueOutput(playableOutput, { title: seoTitle, description: seoDescription, tags: seoTags })}>Queue</Button>}
+                      {onSendToSocial && <Button variant="primary" icon={<Share2 />} onClick={() => onSendToSocial(playableOutput, { title: seoTitle, description: seoDescription, tags: seoTags })}>Send to Social</Button>}
+                    </div>}
+                  </div>
                 ) : (
                   <div className="space-y-3">
-                    {job.result?.success && (
+                    {job.result?.success && job.inputVideo === inputPath && (
                       <div className="flex flex-wrap items-center justify-end gap-2">
                         <Button
                           variant="ghost"
@@ -2896,26 +2999,6 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
                       )}
                     </div>
 
-                    {!job.isRunning &&
-                      job.result?.success &&
-                      renderWarnings.length > 0 && (
-                        <div className="space-y-2">
-                          {renderWarnings.map((w) => (
-                            <Alert key={w.kind} status="warning">
-                              <Alert.Indicator>
-                                <AlertCircle className="size-4" />
-                              </Alert.Indicator>
-                              <Alert.Content>
-                                <Alert.Title>{w.message}</Alert.Title>
-                                {w.detail && (
-                                  <Alert.Description>{w.detail}</Alert.Description>
-                                )}
-                              </Alert.Content>
-                            </Alert>
-                          ))}
-                        </div>
-                      )}
-
                     {job.isRunning && (
                       <div className="space-y-1.5">
                         <div className="truncate font-mono text-xs text-muted">
@@ -2931,30 +3014,15 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
                     {(job.isRunning
                       ? job.logLines.join("\n")
                       : job.result?.stdout) ? (
-                      <pre className=" max-h-48 overflow-y-auto rounded-lg border border-border bg-surface-secondary/70 p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap text-foreground">
+                      <details className="rounded-lg border border-border p-3" open={Boolean(job.error)}>
+                      <summary className="cursor-pointer text-xs font-medium text-muted">Processing details</summary>
+                      <pre className="mt-3 max-h-48 overflow-y-auto rounded-lg border border-border bg-surface-secondary/70 p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap text-foreground">
                         {job.isRunning
                           ? job.logLines.join("\n")
                           : job.result?.stdout}
                       </pre>
+                    </details>
                     ) : null}
-
-                    {job.error && (
-                      <Alert
-                        status={job.status === "cancelled" ? "default" : "danger"}
-                      >
-                        <Alert.Indicator>
-                          <AlertCircle className="size-4" />
-                        </Alert.Indicator>
-                        <Alert.Content>
-                          <Alert.Title>
-                            {job.status === "cancelled"
-                              ? "Render cancelled"
-                              : "Render failed"}
-                          </Alert.Title>
-                          <Alert.Description>{job.error}</Alert.Description>
-                        </Alert.Content>
-                      </Alert>
-                    )}
                   </div>
                 )}
               </SectionCard>
@@ -2988,9 +3056,33 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
                 />
               </SectionCard>
               </div>
-            </div>
+            </section>
           )}
+      </div>
+      {preview && <aside aria-label="Video preview" className="studio-preview-rail">{preview}<p className="mt-3 px-1 text-xs leading-relaxed text-muted">Preview your original or last export. New edits, framing and captions appear after export.</p></aside>}
+      </div>
 
+      <div className="studio-action-bar">
+        <div className="studio-action-summary min-w-0 flex-1">
+          <p className="truncate text-sm font-medium text-foreground">{job.isRunning ? job.stage || "Editing your video…" : metadata ? editSummary : "Add a video to get started"}</p>
+          <p className="truncate text-xs text-muted">{metadata ? `${selectedPresetName} · ${aspectRatio} · Captions ${burnInCaptions ? "on" : "off"}` : "Your projects and exports stay on this computer."}</p>
+          {job.isRunning && <LinearProgress progress={Math.round(job.progress * 100)} label="Editing video" />}
+        </div>
+        <div className="studio-action-buttons flex flex-wrap items-center justify-end gap-2">
+          {stageIndex > 0 && <Button variant="ghost" icon={<ChevronLeft />} onClick={() => goToStage(STUDIO_STAGES[stageIndex - 1].id)}>Back</Button>}
+          {job.isRunning ? <>
+            {activeStage !== "render" && <Button variant="secondary" onClick={() => goToStage("render")}>View progress</Button>}
+            <Button variant="secondary" icon={<Square />} onClick={() => void job.cancel()}>Cancel render</Button>
+          </> : activeStage === "render" ? (
+            <Button variant="primary" size="md" disabled={!canRender} icon={<Play />} onClick={handleRender}>
+              {hasCompletedOutput ? "Export again" : "Export video"}
+            </Button>
+          ) : (
+            <Button variant="primary" size="md" disabled={!metadata} onClick={() => goToStage(STUDIO_STAGES[stageIndex + 1].id)}>
+              Next: {STUDIO_STAGES[stageIndex + 1].label}<ChevronRight className="size-4" />
+            </Button>
+          )}
+        </div>
       </div>
 
       {/* Post-render review suite */}
@@ -3140,6 +3232,7 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
                 </span>
               </span>
             }
+            hint={titleFeedHint(seoTitle)}
             action={
               <Button
                 variant="ghost"

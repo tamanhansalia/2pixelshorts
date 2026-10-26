@@ -6,8 +6,8 @@ import type {
 /**
  * Persistent stream runs (BridgeClip-Library style): every analyzed link
  * keeps its video card, clips, and selection in localStorage, keyed by
- * URL. Switching tabs unmounts Studio and wipes useState — this store
- * is what brings the clips back on return.
+ * URL. App owns active clip requests separately; their completions merge
+ * into this store even while Studio is unmounted.
  */
 
 export interface StreamRun {
@@ -69,9 +69,89 @@ export function blankStreamRun(url: string): StreamRun {
   };
 }
 
+/** How often App re-probes a live link while waiting for the VOD. */
+export const LIVE_WATCH_INTERVAL_MS = 60_000;
+
 /** A run the watcher should keep re-probing: flagged live, no clips yet. */
 export function isWatchableLiveRun(run: StreamRun | null | undefined): boolean {
   return Boolean(run && run.watchLive && run.probe?.is_live && !run.result);
+}
+
+export function watchableLiveUrls(store: StreamRunStore): string[] {
+  return store.recent.filter((url) => isWatchableLiveRun(store.runs[url]));
+}
+
+/** True when the replay has landed and clip finding can run. */
+export function isLiveVodReady(probe: StreamProbe | null | undefined): boolean {
+  return Boolean(probe && !probe.is_live && probe.duration > 0);
+}
+
+export function isLiveCheckDue(run: StreamRun, now = Date.now()): boolean {
+  if (!isWatchableLiveRun(run)) return false;
+  if (!run.lastCheckedAt) return true;
+  const then = Date.parse(run.lastCheckedAt);
+  if (!Number.isFinite(then)) return true;
+  return now - then >= LIVE_WATCH_INTERVAL_MS;
+}
+
+export function liveUrlsDueForCheck(store: StreamRunStore, now = Date.now()): string[] {
+  return watchableLiveUrls(store).filter((url) => isLiveCheckDue(store.runs[url], now));
+}
+
+/** Mark a run as watch-for-VOD after clip finding hits a live stream. */
+export function armWatchLive(
+  store: StreamRunStore,
+  url: string,
+  now = new Date().toISOString(),
+): StreamRunStore {
+  const run = getStreamRun(store, url) ?? blankStreamRun(url);
+  return upsertStreamRun(store, {
+    ...run,
+    watchLive: true,
+    lastCheckedAt: run.lastCheckedAt ?? now,
+    updatedAt: now,
+  });
+}
+
+export function clearWatchLive(
+  store: StreamRunStore,
+  url: string,
+  now = new Date().toISOString(),
+): StreamRunStore {
+  const run = getStreamRun(store, url);
+  if (!run?.watchLive) return store;
+  return {
+    ...store,
+    runs: {
+      ...store.runs,
+      [run.url]: { ...run, watchLive: false, updatedAt: now },
+    },
+  };
+}
+
+/** Apply a watcher re-probe. VOD-ready probes drop the watch flag so
+ * clip finding can start; still-live probes keep watching. */
+export function recordLiveCheck(
+  store: StreamRunStore,
+  url: string,
+  probe: StreamProbe,
+  now = new Date().toISOString(),
+): StreamRunStore {
+  const run = getStreamRun(store, url);
+  if (!run) return store;
+  return {
+    ...store,
+    runs: {
+      ...store.runs,
+      [run.url]: {
+        ...run,
+        probe,
+        lastCheckedAt: now,
+        watchLive: probe.is_live ? run.watchLive : false,
+        updatedAt: now,
+      },
+    },
+  };
 }
 
 /** Insert or replace a run and move its URL to the front of recents. */

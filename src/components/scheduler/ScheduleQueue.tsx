@@ -1,3 +1,4 @@
+import { notify } from "../../lib/notify";
 import React, { useEffect, useMemo, useState } from "react";
 import {
   CalendarClock,
@@ -262,7 +263,11 @@ export const ScheduleQueue: React.FC<ScheduleQueueProps> = ({
     isDraftTimeValid;
 
   const handleSaveEditor = () => {
-    if (!editingItem || !onUpdateJob || !canSaveEditor) return;
+    if (!editingItem || !onUpdateJob) return;
+    if (!canSaveEditor) {
+      notify("Check release details", !draft.title.trim() ? "Enter a post title first." : !draft.date.trim() ? "Pick a release date first." : "Enter a valid release time (HH:MM).", "warning");
+      return;
+    }
     // Same account mapping Social uses at publish time: each channel gets
     // its linked gateway account id. Without a live accounts list the ids
     // are omitted so the entry's existing ones survive.
@@ -289,6 +294,9 @@ export const ScheduleQueue: React.FC<ScheduleQueueProps> = ({
       platforms: [...draft.platforms],
       ...(accountIds !== undefined ? { account_ids: accountIds } : {}),
     });
+    if (isDraftSlotPast || isDraftChannelsEmpty) {
+      notify("Schedule needs attention", [isDraftSlotPast ? "This release is overdue. Move it to a future time or post it now." : "", isDraftChannelsEmpty ? "Pick at least one channel before posting." : ""].filter(Boolean).join(" "), "warning");
+    }
     setEditingId(null);
   };
 
@@ -366,7 +374,7 @@ export const ScheduleQueue: React.FC<ScheduleQueueProps> = ({
       />
 
       <div
-        className={`grid grid-cols-1 items-start gap-5 ${hasQuickSchedule ? "xl:grid-cols-[minmax(0,1fr)_24rem]" : ""}`}
+        className={`queue-layout grid grid-cols-1 items-start gap-6 ${hasQuickSchedule ? "queue-layout--with-schedule" : ""}`}
       >
         <div className="min-w-0 space-y-5">
           <SectionCard
@@ -560,7 +568,7 @@ export const ScheduleQueue: React.FC<ScheduleQueueProps> = ({
                               className="line-clamp-2 text-xs text-danger"
                               title={item.error}
                             >
-                              {item.error}
+                              <button type="button" className="underline" onClick={() => notify("Post needs attention", item.error!, "error")}>View details</button>
                             </div>
                           )}
                         </div>
@@ -786,7 +794,7 @@ export const ScheduleQueue: React.FC<ScheduleQueueProps> = ({
             </Button>
             <Button
               variant="primary"
-              disabled={!canSaveEditor || !onUpdateJob}
+              disabled={!onUpdateJob}
               onClick={handleSaveEditor}
               title={
                 !draft.title.trim()
@@ -979,16 +987,6 @@ export const ScheduleQueue: React.FC<ScheduleQueueProps> = ({
                     ))}
                   </div>
                 )}
-              {isDraftChannelsEmpty && (
-                <p
-                  className="text-xs leading-snug text-warning"
-                  role="status"
-                >
-                  No channels selected — Post now is blocked until you pick
-                  at least one channel. You can still save; the entry stays
-                  queued.
-                </p>
-              )}
             </div>
 
             <div className="grid grid-cols-1 items-end gap-3 sm:grid-cols-3">
@@ -1011,15 +1009,6 @@ export const ScheduleQueue: React.FC<ScheduleQueueProps> = ({
                   }
                   aria-label="Release time"
                 />
-                {!isDraftTimeValid && (
-                  <p
-                    className="mt-1 text-xs leading-snug text-danger"
-                    role="alert"
-                  >
-                    Enter a release time (HH:MM) — an empty time can&apos;t
-                    be saved.
-                  </p>
-                )}
               </Field>
               <div>
                 <Label className="mb-1.5 block text-xs font-medium text-foreground">
@@ -1053,15 +1042,6 @@ export const ScheduleQueue: React.FC<ScheduleQueueProps> = ({
                 </Select>
               </div>
             </div>
-            {isDraftSlotPast && (
-              <p
-                className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs leading-snug text-warning"
-                role="status"
-              >
-                This release slot is in the past — the post will show as
-                Overdue until you move it to a future time or post it now.
-              </p>
-            )}
           </div>
         )}
       </Modal>

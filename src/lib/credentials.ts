@@ -56,7 +56,33 @@ function store() {
     },
   }, localStorage);
 }
+// Concurrent callers share one pending load. A failed load clears itself so a
+// denied macOS keychain prompt can be retried.
+export function singleFlight<T>(load: () => Promise<T>) {
+  let pending: Promise<T> | null = null;
+  return {
+    get() {
+      if (!pending) {
+        pending = load().catch((error) => {
+          pending = null;
+          throw error;
+        });
+      }
+      return pending;
+    },
+    reset() { pending = null; },
+  };
+}
+// Each keychain read can prompt for the macOS login password. StrictMode mounts
+// effects twice in dev, so the desktop read must be shared, not repeated.
+const keychainKeys = singleFlight(() => store().load());
 // Preview credentials are session-only; production persistence uses the OS vault.
-export const loadApiKeys = () => isDesktop() ? store().load() : Promise.resolve({ ...previewKeys });
-export const saveApiKey = (provider: CredentialProvider, value: string) => store().save(provider, value);
-export const clearApiKeys = () => store().clear();
+export const loadApiKeys = () => isDesktop() ? keychainKeys.get() : Promise.resolve({ ...previewKeys });
+export const saveApiKey = async (provider: CredentialProvider, value: string) => {
+  await store().save(provider, value);
+  keychainKeys.reset();
+};
+export const clearApiKeys = async () => {
+  await store().clear();
+  keychainKeys.reset();
+};

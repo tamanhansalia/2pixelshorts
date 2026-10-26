@@ -36,7 +36,7 @@ export function Segmented<T extends string = string>({
       onSelectionChange={(key) => onChange(String(key) as T)}
       className={cn(fill ? "w-full" : "w-fit max-w-full", className)}
     >
-      <Tabs.ListContainer className={fill ? "w-full" : undefined}>
+      <Tabs.ListContainer className={cn("max-w-full overflow-x-auto", fill && "w-full")}>
         <Tabs.List aria-label={label} className={fill ? "w-full" : undefined}>
           {options.map((option) => (
             <Tabs.Tab

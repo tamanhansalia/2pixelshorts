@@ -1,10 +1,8 @@
 import React, { useState, useEffect } from "react";
 import {
-  AlertCircle,
   Check,
   ChevronDown,
   Clock,
-  Copy,
   ExternalLink,
   Film,
   Key,
@@ -14,11 +12,10 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { Alert, ListBox, Select, Spinner } from "@heroui/react";
+import { ListBox, Select, Spinner } from "@heroui/react";
 import { ScheduleItem, SocialPublishPayload, ZernioAccount } from "../../types";
 import {
   DEFAULT_TIMEZONE,
-  formatScheduledLabel,
   splitSchedule,
   type SelectableShort,
 } from "../../lib/outbox";
@@ -341,9 +338,7 @@ export const SocialPublisher: React.FC<SocialPublisherProps> = ({
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitStage, setSubmitStage] = useState<string>("Validating media");
-  const [responseMessage, setResponseMessage] = useState<string | null>(null);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [copiedResponse, setCopiedResponse] = useState(false);
+  const reportError = (message: string) => notify("Couldn’t complete the request", message, "error");
 
   const connectedIds = connectedPlatformIds(accounts);
 
@@ -376,7 +371,7 @@ export const SocialPublisher: React.FC<SocialPublisherProps> = ({
     try {
       const list = await onGetAccounts(apiKey.trim());
       setAccounts(list);
-      setErrorMessage(null);
+
       const connected = connectedPlatformIds(list);
       setSelectedPlatforms((prev) =>
         prev.length === 0
@@ -385,7 +380,7 @@ export const SocialPublisher: React.FC<SocialPublisherProps> = ({
       );
     } catch (e) {
       console.error("Failed to load accounts:", e);
-      setErrorMessage(
+      reportError(
         `Couldn't sync accounts: ${e instanceof Error ? e.message : "gateway request failed"} — check the API key and try again.`,
       );
     } finally {
@@ -418,12 +413,6 @@ export const SocialPublisher: React.FC<SocialPublisherProps> = ({
     );
   };
 
-  const handleCopyResponse = () => {
-    if (!responseMessage) return;
-    navigator.clipboard.writeText(responseMessage);
-    setCopiedResponse(true);
-    setTimeout(() => setCopiedResponse(false), 2000);
-  };
 
   // Schedule mode queues locally: no key or linked channels required.
   // Channels can be picked now (when linked) or later via Queue → Edit.
@@ -444,7 +433,7 @@ export const SocialPublisher: React.FC<SocialPublisherProps> = ({
     e.preventDefault();
 
     if (!hasShort) {
-      setErrorMessage(shortHint);
+      reportError(shortHint);
       return;
     }
 
@@ -459,7 +448,7 @@ export const SocialPublisher: React.FC<SocialPublisherProps> = ({
         ),
     );
     if (unlinked.length > 0) {
-      setErrorMessage(
+      reportError(
         `No linked account for ${unlinked.join(", ")} — sync accounts and try again.`,
       );
       setSelectedPlatforms((prev) =>
@@ -497,23 +486,19 @@ export const SocialPublisher: React.FC<SocialPublisherProps> = ({
     // Schedule → local queue entry, always visible on the Queue page.
     if (!publishNow) {
       if (!canQueueLocal) {
-        setErrorMessage(queueHint ?? "Complete the schedule form first.");
+        reportError(queueHint ?? "Complete the schedule form first.");
         return;
       }
-      const entry = onQueueShort(payload);
-      setErrorMessage(null);
-      setResponseMessage(
-        `Queued "${entry.title}" for ${formatScheduledLabel(entry.scheduled_for)} — post it anytime from the Queue page.`,
-      );
+      onQueueShort(payload);
       return;
     }
 
     if (selectedPlatforms.length === 0) {
-      setErrorMessage("Please select at least one social media channel.");
+      reportError("Please select at least one social media channel.");
       return;
     }
     if (!apiKey.trim()) {
-      setErrorMessage("Zernio API Key is required to publish or schedule posts.");
+      reportError("Zernio API Key is required to publish or schedule posts.");
       setShowApiKeyInput(true);
       return;
     }
@@ -521,7 +506,7 @@ export const SocialPublisher: React.FC<SocialPublisherProps> = ({
       (p) => !connectedIds.includes(p.toLowerCase()),
     );
     if (stale.length > 0) {
-      setErrorMessage(
+      reportError(
         "Selected channels are no longer connected. Sync accounts and try again.",
       );
       setSelectedPlatforms((prev) =>
@@ -532,18 +517,16 @@ export const SocialPublisher: React.FC<SocialPublisherProps> = ({
 
     setIsSubmitting(true);
     setSubmitStage("Preparing media payload...");
-    setErrorMessage(null);
-    setResponseMessage(null);
+
 
     try {
       setSubmitStage("Connecting to Zernio REST Gateway...");
       await new Promise((r) => setTimeout(r, 250));
 
       setSubmitStage(`Dispatching to ${selectedPlatforms.join(", ")}...`);
-      const result = await onPublish(apiKey, payload);
-      setResponseMessage(result);
-    } catch (err: unknown) {
-      setErrorMessage(err instanceof Error ? err.message : "Publishing failed");
+      await onPublish(apiKey, payload);
+    } catch {
+      // The app owns publishing notifications, including partial gateway failures.
     } finally {
       setIsSubmitting(false);
     }
@@ -633,7 +616,7 @@ export const SocialPublisher: React.FC<SocialPublisherProps> = ({
           <Button isLoading={savingKey} onClick={async () => {
             setSavingKey(true);
             try { await onSaveApiKey(apiKeyDraft.trim()); }
-            catch (error) { setErrorMessage(String(error)); }
+            catch (error) { reportError(String(error)); }
             finally { setSavingKey(false); }
           }}>Save key</Button>
           {apiKey.trim() ? (
@@ -648,24 +631,9 @@ export const SocialPublisher: React.FC<SocialPublisherProps> = ({
         </div>
       )}
 
-      {errorMessage && (
-        <Alert status="danger">
-          <Alert.Indicator>
-            <AlertCircle className="size-4" />
-          </Alert.Indicator>
-          <Alert.Content>
-            <Alert.Title>Couldn't complete the request</Alert.Title>
-            <Alert.Description>{errorMessage}</Alert.Description>
-          </Alert.Content>
-          <Button variant="ghost" size="sm" onClick={() => setErrorMessage(null)}>
-            Dismiss
-          </Button>
-        </Alert>
-      )}
-
       <form
         onSubmit={handlePublish}
-        className={`grid grid-cols-1 gap-5 lg:grid-cols-[minmax(0,1fr)_22rem] ${hasShort ? "items-start" : ""}`}
+        className={`social-layout grid grid-cols-1 gap-6 ${hasShort ? "items-start" : ""}`}
       >
         {/* Post */}
         <SectionCard
@@ -825,28 +793,6 @@ export const SocialPublisher: React.FC<SocialPublisherProps> = ({
                     {submitStage}
                   </div>
                   <LinearProgress label="Publishing" />
-                </div>
-              )}
-
-              {responseMessage && (
-                <div className="overflow-hidden rounded-md border border-success/30 bg-success/5">
-                  <div className="flex items-center justify-between gap-2 px-3 py-2">
-                    <span className="flex items-center gap-1.5 text-sm font-medium text-foreground">
-                      <Check className="size-3.5 text-success" strokeWidth={3} />
-                      Gateway response
-                    </span>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      icon={copiedResponse ? <Check /> : <Copy />}
-                      onClick={handleCopyResponse}
-                    >
-                      {copiedResponse ? "Copied" : "Copy"}
-                    </Button>
-                  </div>
-                  <pre className=" max-h-28 overflow-y-auto border-t border-success/20 px-3 py-2 font-mono text-xs whitespace-pre-wrap text-muted">
-                    {responseMessage}
-                  </pre>
                 </div>
               )}
             </div>

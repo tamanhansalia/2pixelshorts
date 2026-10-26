@@ -1,3 +1,4 @@
+import { notify } from "../../lib/notify";
 import React, { useEffect, useRef, useState } from "react";
 import {
   Check,
@@ -5,6 +6,7 @@ import {
   ExternalLink,
   Eye,
   EyeOff,
+  HardDrive,
   Key,
   Monitor,
   Moon,
@@ -19,17 +21,23 @@ import { Button } from "../ui/Button";
 import { PageHeader } from "../layout/PageHeader";
 import { Badge } from "../ui/Badge";
 import { SectionCard } from "../ui/Card";
+import { Segmented } from "../ui/Segmented";
+import type { TranscriptionProvider } from "../../lib/transcription";
 import { CliToolInfo, CommandOutput, TranscriptionStatus } from "../../types";
 import { openExternalUrl, probeTranscription, validateApiKey, isTauri } from "../../lib/ipc";
 import { createLatestGuard, isUnsavedEdit } from "../../lib/asyncLatest";
 import { CliManager } from "../cli/CliManager";
 import { ChannelProfiles } from "./ChannelProfiles";
+import { StorageSettings } from "./StorageSettings";
+import type { StorageDeleteReport, StorageScope } from "../../lib/storage";
 import type { ChannelProfile } from "../../lib/channelProfiles";
 import type { ColorMode } from "../layout/Sidebar";
 
-export type SettingsSubTab = "clis" | "keys" | "channel" | "appearance" | "engine";
+export type SettingsSubTab = "clis" | "keys" | "channel" | "appearance" | "engine" | "storage";
 
 interface SettingsViewProps {
+  transcriptionProvider: TranscriptionProvider;
+  onTranscriptionProviderChange: (provider: TranscriptionProvider) => void;
   zernioKey: string;
   onSaveZernioKey: (key: string) => Promise<void>;
   elevenLabsKey: string;
@@ -39,7 +47,7 @@ interface SettingsViewProps {
   onTriggerToast?: (
     title: string,
     description?: string,
-    type?: "success" | "error" | "info",
+    type?: "success" | "error" | "info" | "warning",
   ) => void;
   // CLI & Agent Props
   tools?: CliToolInfo[];
@@ -63,7 +71,12 @@ interface SettingsViewProps {
   ) => void;
   // Complete local reset (clears storage, then reloads)
   onResetAllData?: () => void;
+  // Storage cleanup: folders/in-use files from app records, and record updates after it
+  storageScope?: StorageScope;
+  onStorageCleaned?: (report: StorageDeleteReport) => void;
 }
+
+const EMPTY_STORAGE_SCOPE: StorageScope = { directories: ["."], recordPaths: [], renderedVideos: [], legacyStreamClips: [], protected: [] };
 
 const SETTINGS_NAV: {
   id: SettingsSubTab;
@@ -100,6 +113,12 @@ const SETTINGS_NAV: {
     label: "Engine",
     description: "Transcription and local processing.",
     icon: <Cpu />,
+  },
+  {
+    id: "storage",
+    label: "Storage",
+    description: "Space used by renders, downloads and leftovers. Clean up what you no longer need.",
+    icon: <HardDrive />,
   },
 ];
 
@@ -202,7 +221,7 @@ const SettingRow: React.FC<{
   children?: React.ReactNode;
 }> = ({ title, description, children }) => (
   <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-2 py-3">
-    <div className="min-w-0 flex-1">
+    <div className="min-w-0 flex-1 basis-56">
       <div className="text-sm font-medium text-foreground">{title}</div>
       {description && (
         <div className="mt-0.5 text-xs leading-relaxed text-muted">
@@ -210,7 +229,7 @@ const SettingRow: React.FC<{
         </div>
       )}
     </div>
-    {children && <div className="flex shrink-0 items-center gap-2">{children}</div>}
+    {children && <div className="flex max-w-full flex-wrap items-center gap-2">{children}</div>}
   </div>
 );
 
@@ -250,6 +269,8 @@ const ThemePreview: React.FC<{ mode: ColorMode }> = ({ mode }) => {
 };
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
+  transcriptionProvider,
+  onTranscriptionProviderChange,
   zernioKey,
   onSaveZernioKey,
   elevenLabsKey,
@@ -278,6 +299,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   defaultChannelId,
   onSaveChannelProfiles,
   onResetAllData = () => {},
+  storageScope = EMPTY_STORAGE_SCOPE,
+  onStorageCleaned = () => {},
 }) => {
   const [internalSubTab, setInternalSubTab] = useState<SettingsSubTab>("clis");
   const currentSubTab = controlledSubTab ?? internalSubTab;
@@ -326,16 +349,18 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   // after the post-save probe and flip Engine back to "Missing".
   const probeGuardRef = useRef(createLatestGuard());
 
-  const refreshTranscription = async (key: string) => {
+  const refreshTranscription = async (key: string, announce = false) => {
     const requestId = probeGuardRef.current.next();
     setIsProbingStt(true);
     try {
-      const status = await probeTranscription(key);
+      const status = await probeTranscription(key, transcriptionProvider);
       if (!probeGuardRef.current.isLatest(requestId)) return;
       setTranscription(status);
-    } catch {
+      if (announce) notify(status.active_engine === "none" ? "Transcription setup required" : "Transcription ready", status.active_engine === "none" ? "Configure the selected provider and install FFmpeg, then recheck." : `Using ${status.active_engine === "local" ? "local Whisper" : "ElevenLabs Scribe"}.`, status.active_engine === "none" ? "warning" : "success");
+    } catch (error) {
       if (!probeGuardRef.current.isLatest(requestId)) return;
       setTranscription(null);
+      notify("Engine check failed", error instanceof Error ? error.message : String(error), "error");
     } finally {
       if (probeGuardRef.current.isLatest(requestId)) {
         setIsProbingStt(false);
@@ -346,7 +371,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   useEffect(() => {
     refreshTranscription(elevenLabsKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [elevenLabsKey]);
+  }, [elevenLabsKey, transcriptionProvider]);
 
   const [zernioStatus, setZernioStatus] = useState<
     "untested" | "valid" | "invalid"
@@ -462,14 +487,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       title="Settings"
       description="Tools, API keys, channel and engine"
     />
-    <div className="grid items-start gap-8 border-t border-separator pt-6 lg:grid-cols-[13rem_minmax(0,1fr)]">
+    <div className="settings-layout grid items-start gap-6 border-t border-separator pt-6">
       <Tabs
         orientation="vertical"
         selectedKey={currentSubTab}
         onSelectionChange={(key) =>
           handleTabChange(String(key) as typeof currentSubTab)
         }
-        className="w-full lg:sticky lg:top-0"
+        className="settings-navigation w-full"
       >
         <Tabs.ListContainer className="w-full">
           <Tabs.List aria-label="Settings sections" className="w-full">
@@ -495,7 +520,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </Tabs.ListContainer>
       </Tabs>
 
-      <div className="min-w-0">
+      <div className="settings-content min-w-0">
         <div className="mb-5">
           <h2 className="text-base font-semibold text-foreground">
             {section.label}
@@ -553,7 +578,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               />
               <ApiKeyRow
                 name="ElevenLabs Scribe"
-                purpose="Word-timestamp transcription when no local captions exist."
+                purpose="Speech-to-Text access for Scribe. Used when ElevenLabs is selected under Engine."
                 status={elevenLabsStatus}
                 value={elKey}
                 placeholder="sk_…"
@@ -636,12 +661,18 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           />
         </div>
 
+        {currentSubTab === "storage" && (
+          <div className="min-w-0">
+            <StorageSettings scope={storageScope} onCleaned={onStorageCleaned} onTriggerToast={onTriggerToast} />
+          </div>
+        )}
+
         <div className={currentSubTab === "engine" ? "min-w-0" : "hidden"}>
           <div className="max-w-3xl space-y-5">
             <SectionCard
               title="Transcription"
               description={
-                transcription
+                !isTauri() ? "Provider saved here; engine availability is checked in the desktop app." : transcription
                   ? transcription.active_engine === "elevenlabs"
                     ? "Using ElevenLabs Scribe"
                     : transcription.active_engine === "local"
@@ -657,33 +688,51 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   variant="ghost"
                   icon={<RefreshCw />}
                   isLoading={isProbingStt}
-                  onClick={() => refreshTranscription(elevenLabsKey)}
+                  onClick={() => {
+                    if (hasUnsavedElevenLabsEdit) notify("Unsaved API key", "Save your key under API keys, then recheck.", "warning");
+                    void refreshTranscription(elevenLabsKey, true);
+                  }}
                   title="Re-check transcription engines"
                 >
                   Recheck
                 </Button>
               }
             >
-              {hasUnsavedElevenLabsEdit && (
-                <div className="mb-2 rounded-xl bg-warning/10 px-3 py-3 text-xs leading-relaxed text-muted">
-                  Unsaved key changes — press Save keys under API keys, then
-                  Recheck, for Engine to pick them up.
-                </div>
-              )}
-              {transcription ? (
+              <div className="space-y-3 py-4">
+                <Segmented<TranscriptionProvider>
+                  label="Transcription provider"
+                  value={transcriptionProvider}
+                  onChange={(provider) => {
+                    onTranscriptionProviderChange(provider);
+                    if (provider === "elevenlabs" && !elevenLabsKey.trim()) notify("ElevenLabs API key required", "Save a key with Speech-to-Text access in Settings → API keys.", "warning");
+                    else notify("Transcription provider saved", provider === "local" ? "Using local Whisper for new transcription jobs." : "Using ElevenLabs for new transcription jobs.", "success");
+                  }}
+                  options={[{ value: "local", label: "Local Whisper" }, { value: "elevenlabs", label: "ElevenLabs API" }]}
+                  fill
+                />
+                <p className="text-xs leading-relaxed text-muted">
+                  {transcriptionProvider === "local"
+                    ? "Transcribes on this device with the installed Whisper model. No transcription API charges or audio uploads."
+                    : "Uploads extracted audio to ElevenLabs Scribe using your saved API key and account allowance. Free credits and limits depend on your ElevenLabs account."}
+                </p>
+                <p className="text-xs leading-relaxed text-muted">Saved automatically. Applies to captions, video analysis and YouTube audio transcription. Available YouTube captions are reused first. Provider failures are reported without switching providers.</p>
+              </div>
+              {transcriptionProvider === "local" && <p className="py-2 text-xs text-muted">Install local transcription: <code className="select-all">cd video-use &amp;&amp; ./setup_local_stt.sh --managed</code></p>}
+              {!isTauri() ? (
+                <p className="py-3 text-xs text-muted">Open the desktop app to check the local model, FFmpeg and saved API key.</p>
+              ) : transcription ? (
                 <>
                   <ul className="divide-y divide-separator">
-                    {engineCheck(
+                    {transcriptionProvider === "elevenlabs" ? engineCheck(
                       transcription.elevenlabs_key_configured,
                       "ElevenLabs API key",
                       transcription.elevenlabs_key_configured
                         ? "Saved"
                         : "Missing — add under API keys",
-                    )}
-                    {engineCheck(
+                    ) : engineCheck(
                       transcription.local_available,
                       "Local faster-whisper",
-                      transcription.local_available ? "Installed" : "Not installed",
+                      transcription.local_available ? `Installed · ${transcription.local_model}` : "Not installed",
                     )}
                     {engineCheck(
                       transcription.ffmpeg_available,
@@ -691,16 +740,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                       transcription.ffmpeg_available ? "Available" : "Missing",
                     )}
                   </ul>
-                  {transcription.active_engine === "none" && (
-                    <div className="mt-2 rounded-xl bg-warning/10 px-3 py-3 text-xs leading-relaxed text-muted">
-                      Analysis and captions need a transcript. Save an
-                      ElevenLabs key, or install local transcription once from
-                      the project root:
-                      <code className="mt-1.5 block w-fit max-w-full rounded bg-surface-tertiary px-1.5 py-0.5 font-mono text-xs break-all text-foreground">
-                        cd video-use &amp;&amp; ./setup_local_stt.sh
-                      </code>
-                    </div>
-                  )}
                 </>
               ) : (
                 <p className="py-3 text-xs text-muted">
@@ -714,7 +753,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <SectionCard title="Processing" contentClassName="p-0">
               <SettingRow
                 title="Local-first"
-                description="Encoding, silence detection, caption burn-in and CLI scripts run on this machine. Only the finished short is uploaded, and only when you publish."
+                description="Encoding, silence detection and caption burn-in run on this machine. ElevenLabs transcription uploads audio when selected; AI editing tools may send transcript text to their provider. Publishing uploads the finished short."
               />
             </SectionCard>
 

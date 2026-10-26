@@ -1,19 +1,24 @@
-"""Trending keyword signals from recent high-view YouTube Shorts.
+"""Trending keyword signals from recent fast-rising YouTube Shorts.
 
 Queries the YouTube Data API ``search.list`` for ``type=video`` +
 ``videoDuration=short`` ordered by ``order=viewCount`` within the last N
-days, then extracts keyword terms from the returned titles/descriptions.
-Results cache per niche for 24h (search calls cost quota).
+days, reads each hit's live view count (``videos.list``, 1 quota unit),
+and ranks title/description terms weighted by views-per-hour, so a
+rising small channel counts more than an old giant. Also returns the
+free YouTube autocomplete phrases for the niche — the searches people
+actually type. Results cache per niche for 24h (search calls cost quota).
 
-Needs a YouTube Data API key (Settings → API keys). Without one — or on
-any API failure — it exits 0 with an empty keyword list and a note, so
-trending never breaks the render/SEO flow.
+Keyword trends need a YouTube Data API key (Settings → API keys).
+Autocomplete needs none. Without a key — or on any API failure — it exits
+0 with whatever it could gather and a note, so trending never breaks the
+render/SEO flow. Set ``PIXEL_DISABLE_SUGGEST=1`` to skip autocomplete.
 
 Stdlib only (urllib).
 """
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
@@ -23,6 +28,9 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 
 SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
+VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
+SUGGEST_URL = "https://suggestqueries.google.com/complete/search"
+MAX_SUGGESTIONS = 10
 CACHE_TTL_SECONDS = 24 * 3600
 
 STOPWORDS = frozenset(
@@ -75,11 +83,20 @@ def tokenize(text):
     return out
 
 
+def velocity_weight(video):
+    """1.0 for unknown stats, growing with log10(views per hour)."""
+    vph = video.get("views_per_hour")
+    if not isinstance(vph, (int, float)) or vph <= 0:
+        return 1.0
+    return 1.0 + math.log10(1.0 + vph)
+
+
 def extract_keywords(videos, top_n=20):
     """Rank terms from video titles/descriptions.
 
     Unigrams plus adjacent-token bigrams; score = occurrence count with
-    bigrams weighted 1.5x. Returns [{term, score, sources}].
+    bigrams weighted 1.5x, scaled by each video's view velocity when
+    known. Returns [{term, score, sources}].
     """
     counts = {}
     sources = {}
@@ -90,8 +107,9 @@ def extract_keywords(videos, top_n=20):
         terms = list(tokens)
         for a, b in zip(tokens, tokens[1:]):
             terms.append(f"{a} {b}")
+        speed = velocity_weight(video)
         for term in terms:
-            weight = 1.5 if " " in term else 1.0
+            weight = (1.5 if " " in term else 1.0) * speed
             counts[term] = counts.get(term, 0.0) + weight
             if term not in seen:
                 seen.add(term)
@@ -146,6 +164,88 @@ def fetch_trending(niche, api_key, region=None, days=7, max_results=25,
     return videos
 
 
+def _get_json(url, timeout):
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8", errors="replace"))
+
+
+def fetch_video_stats(video_ids, api_key, timeout=30):
+    """Live view counts for search hits: {video_id: views}. 1 quota unit.
+
+    Returns {} on any failure; velocity then falls back to plain counts.
+    """
+    ids = [v for v in (video_ids or []) if v][:50]
+    if not ids or not (api_key or "").strip():
+        return {}
+    params = {"part": "statistics", "id": ",".join(ids), "key": api_key}
+    try:
+        payload = _get_json(f"{VIDEOS_URL}?{urllib.parse.urlencode(params)}",
+                            timeout)
+    except Exception as exc:
+        print(f"trending.py: stats fetch failed ({exc})", file=sys.stderr)
+        return {}
+    out = {}
+    for item in payload.get("items", []) or []:
+        stats = item.get("statistics", {}) or {}
+        try:
+            out[item.get("id", "")] = int(stats.get("viewCount", 0))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def apply_velocity(videos, views_by_id, now=None):
+    """Attach views + views_per_hour (since publish) to each video."""
+    now = now or datetime.now(timezone.utc)
+    for video in videos or []:
+        views = views_by_id.get(video.get("video_id", ""))
+        if views is None:
+            continue
+        video["views"] = views
+        try:
+            published = datetime.fromisoformat(
+                (video.get("published_at") or "").replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        hours = max(1.0, (now - published).total_seconds() / 3600.0)
+        video["views_per_hour"] = round(views / hours, 1)
+    return videos
+
+
+def suggest_enabled():
+    return os.environ.get("PIXEL_DISABLE_SUGGEST", "").strip() != "1"
+
+
+def fetch_suggestions(seed, timeout=4, limit=MAX_SUGGESTIONS):
+    """YouTube autocomplete phrases for ``seed`` (free, no key).
+
+    These are the searches people actually type. Fail-soft: any network
+    or parse problem returns [] so SEO never waits on it.
+    """
+    seed = " ".join((seed or "").split())[:100]
+    if not seed or not suggest_enabled():
+        return []
+    params = {"client": "firefox", "ds": "yt", "hl": "en", "q": seed}
+    try:
+        payload = _get_json(f"{SUGGEST_URL}?{urllib.parse.urlencode(params)}",
+                            timeout)
+    except Exception as exc:
+        print(f"trending.py: autocomplete failed ({exc})", file=sys.stderr)
+        return []
+    if not (isinstance(payload, list) and len(payload) > 1
+            and isinstance(payload[1], list)):
+        return []
+    out = []
+    for item in payload[1]:
+        text = " ".join(str(item).lower().split())
+        if text and text not in out:
+            out.append(text)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def load_cache(path):
     try:
         with open(path, "r", encoding="utf-8") as fh:
@@ -189,9 +289,11 @@ def get_trending(niche, api_key=None, region=None, days=7, max_results=25,
         cached["cached"] = True
         return cached
 
+    queries = fetch_suggestions(niche)
+
     if not (api_key or "").strip():
         return {"niche": niche, "keywords": [], "videos": [],
-                "fetched_at": None, "cached": False,
+                "queries": queries, "fetched_at": None, "cached": False,
                 "note": "no YouTube API key configured"}
 
     try:
@@ -200,12 +302,20 @@ def get_trending(niche, api_key=None, region=None, days=7, max_results=25,
     except Exception as exc:
         print(f"trending.py: fetch failed ({exc})", file=sys.stderr)
         return {"niche": niche, "keywords": [], "videos": [],
-                "fetched_at": None, "cached": False, "error": str(exc)}
+                "queries": queries, "fetched_at": None, "cached": False,
+                "error": str(exc)}
 
+    apply_velocity(videos, fetch_video_stats(
+        [v["video_id"] for v in videos], api_key.strip()))
+    rising = sorted(videos, key=lambda v: -(v.get("views_per_hour") or 0))
     doc = {
         "niche": niche,
         "keywords": extract_keywords(videos, top_n=top_n),
-        "videos": [{"title": v["title"], "channel": v["channel"]} for v in videos],
+        "videos": [{"title": v["title"], "channel": v["channel"],
+                    "views": v.get("views"),
+                    "views_per_hour": v.get("views_per_hour")}
+                   for v in rising],
+        "queries": queries,
         "fetched_at": datetime.now(timezone.utc).isoformat(),
         "cached": False,
     }

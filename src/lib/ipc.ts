@@ -1,4 +1,8 @@
 import { invoke } from "./invoke.ts";
+import { transcriptionInvokeParams, type TranscriptionProvider } from "./transcription.ts";
+import { seoSignals } from "./performance.ts";
+import { enrichPublishPayload, getPinnedComment } from "./publishExtras.ts";
+import { getDefaultProfile } from "./channelProfiles.ts";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type {
   CliToolInfo,
@@ -10,126 +14,25 @@ import type {
   SeoMetadata,
   TranscriptionStatus,
   TrendingResult,
-  VideoReviewReport
+  VideoReviewReport,
+  SourceTranscript,
 } from "../types/index.ts";
-import {
-  fitTagBudget,
-  normalizeHashtags,
-  scoreSeoPackage,
-  trimTitle,
-} from "./seo.ts";
-
 export const isTauri = () => {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 };
+
+export async function readSourceTranscript(inputVideo: string, elevenlabsKey?: string,
+  options: { prepare?: boolean; agentId?: string; targetDuration?: number; promptHook?: string; channelContext?: string; transcriptionProvider?: TranscriptionProvider } = {}): Promise<SourceTranscript> {
+  if (!isTauri()) throw new Error("Open the desktop app to transcribe your footage.");
+  return invoke<SourceTranscript>("read_source_transcript", { inputVideo, ...transcriptionInvokeParams(elevenlabsKey, options.transcriptionProvider),
+    prepare: options.prepare ?? false, agentId: options.agentId ?? null, targetDuration: options.targetDuration ?? null,
+    promptHook: options.promptHook ?? null, channelContext: options.channelContext ?? null });
+}
 
 export async function validateApiKey(provider: "zernio" | "elevenlabs" | "youtube", apiKey: string): Promise<void> {
   if (!isTauri()) throw new Error("Live key verification is available in the desktop app.");
   await invoke("validate_api_key", { provider, apiKey });
 }
-
-// Simulated CLI tools used only by the browser preview.
-export const MOCK_TOOLS: CliToolInfo[] = [
-  {
-    id: "claude",
-    name: "Claude Code CLI",
-    command: "claude",
-    path: "claude",
-    version: "2.1.220 (Claude Code)",
-    is_available: true,
-    is_enabled: true,
-    description: "Anthropic Claude Code autonomous agent CLI for conversational video editing and EDL generation.",
-    category: "agent",
-  },
-  {
-    id: "codex",
-    name: "Codex CLI",
-    command: "codex",
-    path: "codex",
-    version: "codex-cli 0.145.0",
-    is_available: true,
-    is_enabled: true,
-    description: "OpenAI Codex CLI for terminal-driven coding, video workflows, and sub-agents.",
-    category: "agent",
-  },
-  {
-    id: "agy",
-    name: "Antigravity CLI (AGY)",
-    command: "agy",
-    path: "agy",
-    version: "1.2.12",
-    is_available: true,
-    is_enabled: true,
-    description: "Google DeepMind Antigravity CLI for pair-programming, multi-agent pipelines, and video tasks.",
-    category: "agent",
-  },
-  {
-    id: "grok",
-    name: "Grok CLI",
-    command: "grok",
-    path: "grok",
-    version: "grok 1.0.0 (3cd0d0cbce)",
-    is_available: true,
-    is_enabled: true,
-    description: "xAI Grok terminal CLI for reasoning, scripting, and content generation.",
-    category: "agent",
-  },
-  {
-    id: "ffmpeg",
-    name: "FFmpeg",
-    command: "ffmpeg",
-    path: "ffmpeg",
-    version: "ffmpeg version 8.1.1",
-    is_available: true,
-    is_enabled: true,
-    description: "Core video & audio transcoding, scaling, 9:16 filtering, and subtitle burning.",
-    category: "media",
-  },
-  {
-    id: "ffprobe",
-    name: "FFprobe",
-    command: "ffprobe",
-    path: "ffprobe",
-    version: "ffprobe version 8.1.1",
-    is_available: true,
-    is_enabled: true,
-    description: "Extracts video stream metadata, audio channels, duration, and frame rate.",
-    category: "media",
-  },
-  {
-    id: "python",
-    name: "Python 3 Runtime",
-    command: "python",
-    path: "python",
-    version: "Python 3.13.14",
-    is_available: true,
-    is_enabled: true,
-    description: "Executes the video-use helper pipeline (render.py, grade.py, transcribe.py).",
-    category: "runtime",
-  },
-  {
-    id: "ytdlp",
-    name: "yt-dlp",
-    command: "yt-dlp",
-    path: "C:\\tools\\yt-dlp.exe",
-    version: "2025.01.15",
-    is_available: true,
-    is_enabled: true,
-    description: "Downloads reference footage, audio, or assets from YouTube and online platforms.",
-    category: "media",
-  },
-  {
-    id: "manim",
-    name: "Manim Community",
-    command: "manim",
-    path: null,
-    version: null,
-    is_available: false,
-    is_enabled: false,
-    description: "Mathematical and programmatic animation engine for diagram overlays.",
-    category: "animation",
-  },
-];
 
 export async function scanClis(): Promise<CliToolInfo[]> {
   if (isTauri()) {
@@ -137,55 +40,28 @@ export async function scanClis(): Promise<CliToolInfo[]> {
   }
   // Browser preview fallback
   await new Promise((r) => setTimeout(r, 0));
-  return MOCK_TOOLS;
+  return [];
 }
 
 export async function probeCustomCli(name: string, pathOrCommand: string): Promise<CliToolInfo> {
   if (isTauri()) {
     return await invoke<CliToolInfo>("probe_custom_cli", { name, pathOrCommand });
   }
-  return {
-    id: `custom-${name.toLowerCase().replace(/\s+/g, "-")}`,
-    name,
-    command: pathOrCommand,
-    path: pathOrCommand,
-    version: "1.0.0 (custom)",
-    is_available: true,
-    is_enabled: true,
-    description: "User registered custom CLI tool",
-    category: "custom",
-  };
+  throw new Error("Open the 2pixelshorts desktop app to use video-use. This browser preview cannot run local tools.");
 }
 
 export async function runCli(command: string, args: string[]): Promise<CommandOutput> {
   if (isTauri()) {
     return await invoke<CommandOutput>("run_cli", { command, args, cwd: null });
   }
-  await new Promise((r) => setTimeout(r, 400));
-  return {
-    success: true,
-    code: 0,
-    stdout: `[SIMULATED CLI EXECUTION]\n$ ${command} ${args.join(" ")}\nOutput: Process returned exit code 0.\nStatus: Ready for processing.`,
-    stderr: "",
-    fallback_used: false,
-  };
+  throw new Error("Open the 2pixelshorts desktop app to use video-use. This browser preview cannot run local tools.");
 }
 
 export async function probeVideo(path: string): Promise<VideoMetadata> {
   if (isTauri()) {
     return await invoke<VideoMetadata>("probe_video", { path });
   }
-  await new Promise((r) => setTimeout(r, 300));
-  return {
-    file_path: path,
-    duration_seconds: 42.5,
-    width: 1920,
-    height: 1080,
-    fps: 30.0,
-    codec: "h264",
-    audio_channels: 2,
-    file_size_bytes: 35600000,
-  };
+  throw new Error("Open the 2pixelshorts desktop app to use video-use. This browser preview cannot run local tools.");
 }
 
 export async function renderShort(
@@ -197,6 +73,7 @@ export async function renderShort(
       outputVideo: params.output_video,
       presetId: params.preset_id,
       agentId: params.agent_id || null,
+      modelId: params.model_id?.trim() || null,
       aspectRatio: params.aspect_ratio || null,
       subtitleStyle: params.subtitle_style || null,
       subtitlePosition: params.subtitle_position || null,
@@ -206,24 +83,20 @@ export async function renderShort(
       cutStart: params.cut_start ?? null,
       cutEnd: params.cut_end ?? null,
       promptHook: params.prompt_hook || null,
-      elevenlabsKey: params.elevenlabs_key || null,
+      ...transcriptionInvokeParams(params.elevenlabs_key, params.transcription_provider),
       channelContext: params.channel_context || null,
       metaTitle: params.meta_title || null,
       metaDesc: params.meta_desc || null,
       metaTags: params.meta_tags || null,
       layout: params.layout || null,
       faceRoi: params.face_roi || null,
+      editPlan: params.edit_plan ?? null,
+      editStrategy: params.edit_strategy ?? null,
+      removeSilence: params.remove_silence ?? null,
+      removeRetakes: params.remove_retakes ?? null,
     });
   }
-  await new Promise((r) => setTimeout(r, 1400));
-  const aspect = params.aspect_ratio || "9:16";
-  return {
-    success: true,
-    code: 0,
-    stdout: `[STAGE 1/4] Probing audio & phrase cues for ${params.input_video}\n[STAGE 2/4] AI Agent (${(params.agent_id || "claude").toUpperCase()}) selected viral cuts with auto sentence boundary completion\n[STAGE 3/4] Trimming dead pauses & baking 30ms anti-pop crossfades\n[STAGE 4/4] ${aspect} crop, ${params.preset_id} grade & ${params.subtitle_style === "none" ? "clean video" : `${params.subtitle_style || "pop"} subtitles (${params.subtitle_position || "bottom"}, ${params.subtitle_size || "standard"})`}\n[AI SEO] Embedded title "${params.meta_title || "Auto AI Title"}" & metadata package into MP4\n[COMPLETE] ${aspect} Short rendered: ${params.output_video}`,
-    stderr: `video-use engine: cuts extracted, 30ms crossfade applied, SEO metadata embedded.`,
-    fallback_used: false,
-  };
+  throw new Error("Open the 2pixelshorts desktop app to use video-use. This browser preview cannot run local tools.");
 }
 
 export async function generateSeoMetadata(
@@ -231,120 +104,25 @@ export async function generateSeoMetadata(
   channelContext?: string,
   agentId?: string,
   elevenlabsKey?: string,
+  transcriptionProvider?: TranscriptionProvider,
+  signals: { trendTerms: string[]; winningTitles: string[] } = seoSignals(),
 ): Promise<SeoMetadata> {
   if (isTauri()) {
     // Desktop: the video-use engine transcribes the source and (for a named
     // agent) has the agent CLI write the package. Failures reject so the UI
-    // shows an honest empty state — never template text.
+    // shows an honest empty state — never template text. Recent niche
+    // trends and this channel's winning titles steer every run.
     const raw = await invoke<string>("generate_seo_metadata", {
       inputVideo,
       channelContext: channelContext || null,
       agentId: agentId || null,
-      elevenlabsKey: elevenlabsKey || null,
+      ...transcriptionInvokeParams(elevenlabsKey, transcriptionProvider),
+      trendTerms: signals.trendTerms.length ? signals.trendTerms : null,
+      winningTitles: signals.winningTitles.length ? signals.winningTitles : null,
     });
     return JSON.parse(raw);
   }
-
-  // High-fidelity fallback algorithm
-  await new Promise((r) => setTimeout(r, 600));
-  const filename = inputVideo.split(/[\\/]/).pop()?.replace(/\.[^/.]+$/, "") || "video";
-  const cleanName = filename.replace(/[-_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-
-  const ctxLower = (channelContext || "").toLowerCase();
-  
-  // Custom topic extraction based on channel context or filename
-  let topic = cleanName;
-  if (ctxLower.includes("rust") || ctxLower.includes("tauri")) {
-    topic = "Rust & Tauri";
-  } else if (ctxLower.includes("ai") || ctxLower.includes("code") || cleanName.toLowerCase().includes("ai")) {
-    topic = "AI Developer Tool";
-  } else if (ctxLower.includes("saas") || ctxLower.includes("startup")) {
-    topic = "Indie SaaS";
-  } else if (ctxLower.includes("python")) {
-    topic = "Python Automation";
-  }
-
-  const primaryTitle = `The Secret ${topic} Workflow Nobody Tells You 🤫`;
-  const alt1 = `Stop Doing This With ${topic} (Do This Instead) ❌`;
-  const alt2 = `This New ${topic} Feels Like Cheating ⚡`;
-  const alt3 = `How to Master ${topic} in 60 Seconds 🚀`;
-
-  // Tag bench + hashtags through the shared SEO core so the browser
-  // preview follows the same budget and normalization rules as the engine.
-  const tags = fitTagBudget([
-    topic.toLowerCase(),
-    `${topic.toLowerCase()} tutorial`,
-    `${topic.toLowerCase()} shorts`,
-    "shorts",
-    "tech",
-    "coding",
-    "developer",
-    "software engineering",
-    `${topic.toLowerCase()} tips`,
-    "ai tools",
-    "productivity",
-    "webdev",
-    "programming tips",
-    "short",
-    "how to",
-    "beginners guide",
-    "explained",
-    "crash course",
-  ]);
-
-  const hashtags = normalizeHashtags(tags);
-
-  const channelNiche = channelContext ? channelContext.trim() : "daily tech & developer guides";
-  const hook = `Stop doing this with ${topic} — here is what top engineers do instead.`;
-  const overview =
-    `The complete breakdown on ${topic}! In this short, we review the entire workflow from start to finish.\n\n` +
-    `👉 Subscribe to our channel for ${channelNiche}!`;
-  const highlights = [
-    `Core breakthrough with ${topic}`,
-    "How to optimize performance and save hours",
-    "Pro tips for modern creators",
-  ];
-  const description =
-    `${hook}\n\n${overview}\n\n📌 Key Highlights:\n` +
-    highlights.map((h) => `• ${h}`).join("\n") +
-    `\n\n🔍 Search Keywords:\n${tags.join(", ")}\n\n${hashtags.join(" ")}`;
-  const keywords = [topic.toLowerCase(), "workflow", "optimization", "productivity"];
-  // Honest package-quality score from the shared scorer — never a fixed
-  // near-perfect figure for ungrounded preview copy.
-  const quality = scoreSeoPackage(
-    alt2,
-    description,
-    tags,
-    hashtags,
-    keywords,
-    0,
-  );
-
-  return {
-    title: trimTitle(alt2),
-    title_alternatives: [primaryTitle, alt1, alt2, alt3].map((t) => trimTitle(t)),
-    description,
-    tags,
-    hashtags,
-    seo_score: quality.score,
-    quality_score: quality.qualityScore,
-    quality_checks: quality.checks,
-    keywords_analyzed: keywords,
-    review_report: {
-      overall_summary: `Preview package for ${filename} (browser preview — no transcript analyzed). Audio pacing and hooks will be measured from the real recording on desktop.`,
-      hook_detected: `Stop doing this with ${topic} - here is what top engineers do instead.`,
-      content_highlights: [
-        `Core breakthrough and architecture breakdown of ${topic}`,
-        "Performance benchmarks and speed optimizations",
-        "Real-world edge cases to avoid when deploying",
-        "Actionable steps to set this up in under 60 seconds"
-      ],
-      retention_score: quality.score,
-      target_audience: `Engineers, developers, and tech builders aligned with your channel profile.`,
-      suggested_pacing: "Fast-paced punchy cuts with 30ms anti-pop crossfades",
-      word_count: 0
-    }
-  };
+  throw new Error("Open the 2pixelshorts desktop app to use video-use. This browser preview cannot run local tools.");
 }
 
 /**
@@ -353,10 +131,13 @@ export async function generateSeoMetadata(
  */
 export async function probeTranscription(
   elevenlabsKey?: string,
+  transcriptionProvider?: TranscriptionProvider,
 ): Promise<TranscriptionStatus> {
   if (isTauri()) {
     return await invoke<TranscriptionStatus>("probe_transcription", {
-      elevenlabsKey: elevenlabsKey?.trim() ? elevenlabsKey.trim() : null,
+      ...transcriptionInvokeParams(elevenlabsKey, transcriptionProvider),
+      // Readiness reports the saved key even when Local is selected.
+      elevenlabsKey: elevenlabsKey?.trim() || null,
     });
   }
   const keyConfigured = !!elevenlabsKey?.trim();
@@ -365,7 +146,7 @@ export async function probeTranscription(
     local_available: false,
     local_model: "tiny.en",
     ffmpeg_available: false,
-    active_engine: keyConfigured ? "elevenlabs" : "none",
+    active_engine: "none",
   };
 }
 
@@ -396,22 +177,7 @@ export async function fetchTrending(
       apiKey: apiKey || null,
     });
   }
-  // Browser preview: clearly-marked sample terms, no network involved.
-  await new Promise((r) => setTimeout(r, 500));
-  return {
-    niche,
-    keywords: [
-      { term: "rust async", score: 9.5, sources: 4 },
-      { term: "connection pooling", score: 7.0, sources: 3 },
-      { term: "ai agents", score: 6.5, sources: 3 },
-      { term: "shorts", score: 6.0, sources: 5 },
-      { term: "tauri v2", score: 4.5, sources: 2 },
-    ],
-    videos: [],
-    fetched_at: new Date().toISOString(),
-    cached: false,
-    note: "simulated",
-  };
+  throw new Error("Open the desktop app to fetch real trending keywords with video-use.");
 }
 
 export async function getZernioAccounts(apiKey: string): Promise<ZernioAccount[]> {
@@ -479,7 +245,13 @@ export async function publishToZernio(
   payload: SocialPublishPayload
 ): Promise<string> {
   if (isTauri()) {
-    return await invoke<string>("publish_to_zernio", { apiKey, payload });
+    // Pinned comment, real hashtags and the profile's YouTube category ride
+    // along here so every Studio / Social / Queue path gets them.
+    const enriched = enrichPublishPayload(payload, {
+      pinnedComment: getPinnedComment(payload.video_path),
+      youtubeCategory: getDefaultProfile()?.youtubeCategory,
+    });
+    return await invoke<string>("publish_to_zernio", { apiKey, payload: enriched });
   }
   await new Promise((r) => setTimeout(r, 600));
   return JSON.stringify(
@@ -507,6 +279,17 @@ export async function getPostStatus(
   }
   await new Promise((r) => setTimeout(r, 300));
   return JSON.stringify({ post: { _id: postId, status: "scheduled" } });
+}
+
+/** Zernio analytics body for one post (`{"pending": true}` while syncing). */
+export async function getPostAnalytics(
+  apiKey: string,
+  postId: string,
+): Promise<string> {
+  if (isTauri()) {
+    return await invoke<string>("get_post_analytics", { apiKey, postId });
+  }
+  throw new Error("Open the desktop app to read post analytics.");
 }
 
 export async function retryPost(

@@ -2,7 +2,9 @@ pub mod cli_scanner;
 pub mod credentials;
 pub mod jobs;
 pub mod models;
+pub mod storage;
 pub mod video_runner;
+pub mod transcription;
 pub mod zernio;
 
 use jobs::RenderRequest;
@@ -43,8 +45,15 @@ async fn validate_api_key(provider: String, api_key: String) -> Result<(), Strin
         _ => return Err("Unknown credential provider".into()),
     };
     let response = request.send().await.map_err(|_| "Could not reach the service. Check your connection and retry.".to_string())?;
-    if response.status().is_success() { Ok(()) }
-    else { Err(format!("Service rejected the authentication check (HTTP {}). Check the key and its API permissions.", response.status().as_u16())) }
+    let status = response.status();
+    if status.is_success() { return Ok(()); }
+    if provider == "elevenlabs" && (status.as_u16() == 401 || status.as_u16() == 403) {
+        let detail = response.json::<serde_json::Value>().await.unwrap_or_default();
+        if detail["detail"]["status"].as_str() == Some("missing_permissions") {
+            return Err("This read-only key test requires User:Read permission. A Speech-to-Text-only key can still be saved and used with Scribe; this test does not consume transcription credits.".into());
+        }
+    }
+    Err(format!("Service rejected the authentication check (HTTP {}). Check the key and its API permissions.", status.as_u16()))
 }
 
 #[tauri::command]
@@ -58,8 +67,36 @@ async fn probe_custom_cli(name: String, path_or_command: String) -> Result<CliTo
 }
 
 #[tauri::command]
-async fn probe_video(path: String) -> Result<VideoMetadata, String> {
-    video_runner::probe_video_metadata(&path).await
+async fn probe_video(app: tauri::AppHandle, path: String) -> Result<VideoMetadata, String> {
+    let metadata = video_runner::probe_video_metadata(&path).await?;
+    app.asset_protocol_scope().allow_file(&path).map_err(|e| e.to_string())?;
+    Ok(metadata)
+}
+
+#[tauri::command]
+async fn read_source_transcript(input_video: String, elevenlabs_key: Option<String>, transcription_provider: Option<String>,
+    prepare: Option<bool>, agent_id: Option<String>, target_duration: Option<f64>,
+    prompt_hook: Option<String>, channel_context: Option<String>) -> Result<serde_json::Value, String> {
+    let script = jobs::resolve_helper_script("transcript_edit.py");
+    let mut args = vec![script, "--input".into(), input_video];
+    if prepare == Some(true) { args.push("--prepare".into()); }
+    for (flag, value) in [("--agent", agent_id), ("--prompt", prompt_hook), ("--channel-context", channel_context)] {
+        if let Some(value) = value.filter(|v| !v.trim().is_empty()) { args.extend([flag.into(), value]); }
+    }
+    if let Some(duration) = target_duration {
+        if !duration.is_finite() || duration <= 0. { return Err("Target duration must be positive".into()); }
+        args.extend(["--duration".into(), duration.to_string()]);
+    }
+    args.extend(transcription::helper_args(transcription_provider.as_deref(), elevenlabs_key.as_deref(), true)?);
+    let out = video_runner::run_helper_process(&jobs::resolve_python(), &args, None).await?;
+    if !out.success {
+        return Err(out.stderr.lines().rev().find(|line| line.starts_with("Transcript:"))
+            .unwrap_or("Could not read transcript. Check transcription in Settings.").to_string());
+    }
+    let json = out.stdout.split("__TRANSCRIPT_START__").nth(1)
+        .and_then(|s| s.split("__TRANSCRIPT_END__").next())
+        .ok_or("Transcript worker returned no transcript")?;
+    serde_json::from_str(json.trim()).map_err(|e| format!("Invalid transcript: {}", e))
 }
 
 #[tauri::command]
@@ -77,6 +114,7 @@ async fn render_short(
     output_video: String,
     preset_id: String,
     agent_id: Option<String>,
+    model_id: Option<String>,
     subtitle_style: Option<String>,
     subtitle_position: Option<String>,
     subtitle_size: Option<String>,
@@ -86,6 +124,7 @@ async fn render_short(
     cut_end: Option<f64>,
     prompt_hook: Option<String>,
     elevenlabs_key: Option<String>,
+    transcription_provider: Option<String>,
     channel_context: Option<String>,
     meta_title: Option<String>,
     meta_desc: Option<String>,
@@ -93,6 +132,10 @@ async fn render_short(
     aspect_ratio: Option<String>,
     layout: Option<String>,
     face_roi: Option<String>,
+    edit_plan: Option<serde_json::Value>,
+    edit_strategy: Option<String>,
+    remove_silence: Option<bool>,
+    remove_retakes: Option<bool>,
 ) -> Result<CommandOutput, String> {
     let req = RenderRequest {
         input_video: input_video.clone(),
@@ -101,6 +144,7 @@ async fn render_short(
         cut_start,
         cut_end,
         agent_id,
+        model_id,
         subtitle_style,
         subtitle_position,
         subtitle_size,
@@ -108,6 +152,7 @@ async fn render_short(
         target_duration,
         prompt_hook,
         elevenlabs_key,
+        transcription_provider,
         channel_context,
         meta_title,
         meta_desc,
@@ -115,10 +160,14 @@ async fn render_short(
         aspect_ratio,
         layout,
         face_roi,
+        edit_plan,
+        edit_strategy,
+        remove_silence,
+        remove_retakes,
     };
     req.validate()?;
     let script_path = jobs::resolve_pipeline_script();
-    let args = req.to_pipeline_args(&script_path);
+    let (args, _plan_file) = req.prepare_pipeline_args(&script_path)?;
 
     // Execute Python Short Creation Pipeline
     let python = jobs::resolve_python();
@@ -136,6 +185,7 @@ async fn start_render_job(
     output_video: String,
     preset_id: String,
     agent_id: Option<String>,
+    model_id: Option<String>,
     subtitle_style: Option<String>,
     subtitle_position: Option<String>,
     subtitle_size: Option<String>,
@@ -145,6 +195,7 @@ async fn start_render_job(
     cut_end: Option<f64>,
     prompt_hook: Option<String>,
     elevenlabs_key: Option<String>,
+    transcription_provider: Option<String>,
     channel_context: Option<String>,
     meta_title: Option<String>,
     meta_desc: Option<String>,
@@ -152,6 +203,10 @@ async fn start_render_job(
     aspect_ratio: Option<String>,
     layout: Option<String>,
     face_roi: Option<String>,
+    edit_plan: Option<serde_json::Value>,
+    edit_strategy: Option<String>,
+    remove_silence: Option<bool>,
+    remove_retakes: Option<bool>,
 ) -> Result<String, String> {
     let req = RenderRequest {
         input_video,
@@ -160,6 +215,7 @@ async fn start_render_job(
         cut_start,
         cut_end,
         agent_id,
+        model_id,
         subtitle_style,
         subtitle_position,
         subtitle_size,
@@ -167,6 +223,7 @@ async fn start_render_job(
         target_duration,
         prompt_hook,
         elevenlabs_key,
+        transcription_provider,
         channel_context,
         meta_title,
         meta_desc,
@@ -174,6 +231,10 @@ async fn start_render_job(
         aspect_ratio,
         layout,
         face_roi,
+        edit_plan,
+        edit_strategy,
+        remove_silence,
+        remove_retakes,
     };
     req.validate()?;
     let job_id = {
@@ -198,13 +259,14 @@ async fn run_render_job(app: tauri::AppHandle, job_id: String, req: RenderReques
     jobs::emit_progress(&app, &job_id, 0.0, "Starting pipeline", "Starting pipeline", false);
 
     let script_path = jobs::resolve_pipeline_script();
-    let args = req.to_pipeline_args(&script_path);
 
     let line_app = app.clone();
     let line_id = job_id.clone();
     let mut last_progress = 0.0f32;
     let python = jobs::resolve_python();
-    let output = jobs::run_pipeline_streaming(&python, &args, |line| {
+    let output = match req.prepare_pipeline_args(&script_path) {
+      Err(error) => Err(error),
+      Ok((args, _plan_file)) => jobs::run_pipeline_streaming(&python, &args, |line| {
         let registry = line_app.state::<jobs::JobRegistry>();
         let stage = line.to_string();
         if let Some(p) = jobs::parse_progress_line(line) {
@@ -213,7 +275,8 @@ async fn run_render_job(app: tauri::AppHandle, job_id: String, req: RenderReques
         }
         jobs::emit_progress(&line_app, &line_id, last_progress, &stage, line, false);
     })
-    .await;
+    .await,
+    };
 
     let registry = app.state::<jobs::JobRegistry>();
     let cancelled = matches!(
@@ -334,12 +397,31 @@ async fn fetch_trending(
         .map_err(|e| format!("trending returned invalid JSON: {}", e))
 }
 
+/// `a|b|c` for the SEO helper: trimmed, pipes stripped, at most 10 items.
+fn join_signal_list(values: Option<&[String]>) -> Option<String> {
+    let items: Vec<String> = values
+        .unwrap_or(&[])
+        .iter()
+        .map(|v| v.replace('|', " ").split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|v| !v.is_empty())
+        .take(10)
+        .collect();
+    if items.is_empty() {
+        None
+    } else {
+        Some(items.join("|"))
+    }
+}
+
 #[tauri::command]
 async fn generate_seo_metadata(
     input_video: String,
     channel_context: Option<String>,
     agent_id: Option<String>,
     elevenlabs_key: Option<String>,
+    transcription_provider: Option<String>,
+    trend_terms: Option<Vec<String>>,
+    winning_titles: Option<Vec<String>>,
 ) -> Result<String, String> {
     let script_path = jobs::resolve_pipeline_script();
 
@@ -366,12 +448,15 @@ async fn generate_seo_metadata(
         }
     }
 
-    if let Some(key) = elevenlabs_key {
-        if !key.trim().is_empty() {
-            args.push("--elevenlabs-key".to_string());
-            args.push(key);
+    // Market signals ride as pipe-separated lists (see split_signal_arg).
+    for (flag, values) in [("--trend-terms", trend_terms), ("--winning-titles", winning_titles)] {
+        if let Some(joined) = join_signal_list(values.as_deref()) {
+            args.push(flag.to_string());
+            args.push(joined);
         }
     }
+
+    args.extend(transcription::helper_args(transcription_provider.as_deref(), elevenlabs_key.as_deref(), true)?);
 
     let python = jobs::resolve_python();
     let output = video_runner::run_helper_process(&python, &args, None).await;
@@ -441,6 +526,8 @@ async fn probe_stream(url: String) -> Result<serde_json::Value, String> {
 #[tauri::command]
 async fn suggest_stream_clips(
     url: String,
+    transcription_provider: Option<String>,
+    elevenlabs_key: Option<String>,
     agent_id: Option<String>,
     channel_context: Option<String>,
     prompt_hook: Option<String>,
@@ -457,6 +544,8 @@ async fn suggest_stream_clips(
         "--url".to_string(),
         url,
     ];
+    // Captioned sources need no paid call or key. Audio fallback validates the key.
+    args.extend(transcription::helper_args(transcription_provider.as_deref(), elevenlabs_key.as_deref(), false)?);
     if let Some(agent) = agent_id {
         if !agent.trim().is_empty() {
             args.push("--agent".to_string());
@@ -503,6 +592,10 @@ async fn suggest_stream_clips(
         } else {
             out.stderr.trim().to_string()
         };
+        // Progress precedes transcription failures; preserve the final error.
+        let detail = out.stderr.lines().rev()
+            .find(|line| line.starts_with("stream_clip.py:"))
+            .unwrap_or(&detail);
         let short: String = detail.chars().take(400).collect();
         return Err(short);
     }
@@ -512,6 +605,8 @@ async fn suggest_stream_clips(
 
 /// Download one clip window from a stream URL via yt-dlp sections.
 /// Only the winning window is fetched — never the full VOD.
+/// Relative names land in `~/.2pixelshorts/clips` so YouTube-only studio
+/// sessions (no local file yet) still get a stable, probe-able path.
 #[tauri::command]
 async fn fetch_stream_clip(
     url: String,
@@ -519,6 +614,7 @@ async fn fetch_stream_clip(
     end: f64,
     output: String,
 ) -> Result<CommandOutput, String> {
+    let output = jobs::resolve_stream_clip_output(&output)?;
     let script = jobs::resolve_helper_script("stream_clip.py");
     let args = vec![
         script,
@@ -541,9 +637,11 @@ async fn fetch_stream_clip(
 #[tauri::command]
 async fn probe_transcription(
     elevenlabs_key: Option<String>,
+    transcription_provider: Option<String>,
 ) -> Result<TranscriptionStatus, String> {
     let script = jobs::resolve_helper_script("transcribe.py");
     let mut args = vec![script, "--probe".to_string()];
+    args.extend(transcription::helper_args(transcription_provider.as_deref(), None, false)?);
     if let Some(key) = elevenlabs_key {
         if !key.trim().is_empty() {
             args.push("--elevenlabs-key".to_string());
@@ -820,6 +918,38 @@ async fn get_post_status(api_key: String, post_id: String) -> Result<String, Str
     }
 }
 
+/// Read post analytics (views, likes, comments, shares per platform) for a
+/// published post from `GET /v1/analytics?postId=`. A 202 means Zernio is
+/// still syncing metrics; it comes back as `{"pending": true}`.
+#[tauri::command]
+async fn get_post_analytics(api_key: String, post_id: String) -> Result<String, String> {
+    if api_key.trim().is_empty() {
+        return Err("Zernio API key is empty.".to_string());
+    }
+    if post_id.trim().is_empty() {
+        return Err("Post id is empty.".to_string());
+    }
+    let client = gateway_client()?;
+    let res = client
+        .get("https://zernio.com/api/v1/analytics")
+        .query(&[("postId", post_id.trim())])
+        .header("Authorization", format!("Bearer {}", api_key.trim()))
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(|e| format!("Failed to connect to Zernio API: {}", e))?;
+    let status = res.status();
+    let text = res.text().await.unwrap_or_default();
+    if status.as_u16() == 202 {
+        return Ok(serde_json::json!({ "pending": true }).to_string());
+    }
+    if status.is_success() {
+        Ok(text)
+    } else {
+        Err(zernio::format_api_error(status.as_u16(), &text))
+    }
+}
+
 #[tauri::command]
 async fn retry_post(api_key: String, post_id: String) -> Result<String, String> {
     if api_key.trim().is_empty() {
@@ -910,6 +1040,24 @@ async fn open_file_location(path: String) -> Result<(), String> {
     Ok(())
 }
 
+/// List files the app created (renders, downloads, leftovers, caches, engine backups).
+#[tauri::command]
+async fn scan_storage(scope: storage::StorageScope) -> Result<Vec<storage::StorageItem>, String> {
+    tokio::task::spawn_blocking(move || storage::scan(&scope, &storage::Roots::detect()))
+        .await
+        .map_err(|_| "Storage scan failed".to_string())
+}
+
+/// Move the selected app files to the Trash. Paths are re-validated by a fresh scan.
+#[tauri::command]
+async fn delete_storage_items(scope: storage::StorageScope, paths: Vec<String>) -> Result<storage::DeleteReport, String> {
+    tokio::task::spawn_blocking(move || {
+        storage::delete_with(&scope, &storage::Roots::detect(), &paths, storage::move_to_trash)
+    })
+    .await
+    .map_err(|_| "Storage cleanup failed".to_string())
+}
+
 #[tauri::command]
 async fn open_file(path: String) -> Result<(), String> {
     ensure_path_exists(&path)?;
@@ -969,6 +1117,7 @@ pub fn run() {
             scan_clis,
             probe_custom_cli,
             probe_video,
+            read_source_transcript,
             run_cli,
             render_short,
             start_render_job,
@@ -980,12 +1129,15 @@ pub fn run() {
             probe_stream,
             suggest_stream_clips,
             fetch_stream_clip,
+            scan_storage,
+            delete_storage_items,
             generate_seo_metadata,
             probe_transcription,
             get_zernio_accounts,
             get_zernio_connect_url,
             publish_to_zernio,
             get_post_status,
+            get_post_analytics,
             retry_post,
             pick_video_file,
             open_file_location,

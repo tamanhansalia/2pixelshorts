@@ -8,17 +8,21 @@ and everything above ``--threshold`` survives, subject to an overlap /
 min-gap merge and a ``--max-clips`` safety cap.
 
 Transcript source order (first win):
-1. YouTube/Twitch captions via ``yt-dlp`` (free, timestamped, fast).
-2. ``--words words.json`` (a transcript produced by ``transcribe.py``).
+1. Explicit ``--words words.json`` (a transcript produced by ``transcribe.py``).
+2. YouTube/Twitch captions via ``yt-dlp`` (free, timestamped, fast).
+3. Download audio and transcribe with the selected provider when captions are unavailable.
 
 Stdlib only; ``yt-dlp`` and ``ffmpeg`` are shelled out to (never imported).
 """
 
 import argparse
 import glob
+import html
 import json
+import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -65,6 +69,50 @@ class StreamClipError(Exception):
     pass
 
 
+UNFINISHED_LIVE_STATUSES = frozenset({"is_live", "is_upcoming", "post_live"})
+LIVE_REFUSAL = (
+    "that stream is live right now: "
+    "clip finding needs the finished VOD — "
+    "watch this link and retry after it ends"
+)
+# Reject in-progress lives at download time so a missed probe cannot
+# record HLS until the 1-hour audio timeout (the 30–40 minute hang).
+LIVE_REJECT_FILTER = (
+    "!is_live & live_status!=is_live & "
+    "live_status!=is_upcoming & live_status!=post_live"
+)
+LIVE_REJECT_ARGS = ["--match-filter", LIVE_REJECT_FILTER]
+
+
+def is_unfinished_live(doc):
+    """True when clip finding cannot run yet (live, upcoming, or VOD processing).
+
+    yt-dlp often omits ``is_live`` or sets it to None while ``live_status``
+    is ``is_live`` / ``post_live``. A just-ended ``was_live`` with no
+    duration is still processing. All of those must fail fast — never
+    download or transcribe.
+    """
+    if not isinstance(doc, dict):
+        return False
+    if doc.get("is_live"):
+        return True
+    status = str(doc.get("live_status") or "").strip().lower()
+    if status in UNFINISHED_LIVE_STATUSES:
+        return True
+    if doc.get("was_live"):
+        try:
+            duration = float(doc.get("duration") or 0.0)
+        except (TypeError, ValueError):
+            duration = 0.0
+        if duration <= 0:
+            return True
+    return False
+
+
+def _rejected_unfinished_live(stderr):
+    return "match filter" in (stderr or "").lower()
+
+
 def is_supported_url(url):
     """True for public YouTube links (live or VOD) / Twitch VOD links.
 
@@ -94,12 +142,11 @@ def is_supported_url(url):
 def _run(cmd, timeout):
     try:
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout,
+            cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
         )
     except FileNotFoundError:
         raise StreamClipError(
-            f"required binary not found: {cmd[0]} "
-            "(install yt-dlp and make sure it is in PATH)"
+            f"required binary not found: {cmd[0]} (install it and make sure it is in PATH)"
         )
     except subprocess.TimeoutExpired:
         raise StreamClipError(f"timed out running: {' '.join(cmd[:3])} ...")
@@ -126,10 +173,10 @@ def probe_url(url, timeout=60):
         raise StreamClipError("could not parse video metadata for that link")
     thumbs = doc.get("thumbnails") or []
     thumb = thumbs[-1].get("url") if thumbs and isinstance(thumbs[-1], dict) else None
-    if doc.get("is_live"):
-        # Live right now: report it instead of raising, so the caller can
-        # enter watch-for-VOD mode and retry after the stream ends.
-        # Duration is meaningless mid-stream; the VOD re-probe fills it in.
+    if is_unfinished_live(doc):
+        # Live, upcoming, or VOD still processing: report is_live so the
+        # caller can watch until the replay lands. Duration is meaningless
+        # until then; the VOD re-probe fills it in.
         return {
             "url": url,
             "title": doc.get("title") or "Untitled live stream",
@@ -162,7 +209,7 @@ def parse_vtt_time(stamp):
 
 
 def _clean_cue_text(raw):
-    text = re.sub(r"<[^>]+>", "", raw or "")
+    text = html.unescape(re.sub(r"<[^>]+>", "", raw or ""))
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
@@ -210,19 +257,39 @@ def parse_json3(doc):
     for event in events:
         if not isinstance(event, dict):
             continue
-        base = float(event.get("tStartMs", 0) or 0) / 1000.0
+        try:
+            base = float(event.get("tStartMs", 0) or 0) / 1000.0
+            event_end = base + float(event.get("dDurationMs", 0) or 0) / 1000.0
+        except (TypeError, ValueError):
+            continue
         segs = event.get("segs") or []
+        if event_end > base and segs and all(isinstance(s, dict) and not
+                ("tOffsetMs" in s or "tDurationMs" in s) for s in segs):
+            segs = [{"utf8": " ".join(s.get("utf8") or "" for s in segs)}]
         cursor = base
-        for seg in segs:
+        for i, seg in enumerate(segs):
             if not isinstance(seg, dict):
                 continue
-            token = (seg.get("utf8") or "").strip()
+            token = _clean_cue_text(seg.get("utf8") or "")
             if not token:
                 continue
-            dur = float(seg.get("tDurationMs", 0) or 0) / 1000.0
-            dur = dur if dur > 0 else max(0.2, 0.06 * len(token))
-            words.append({"word": token, "start": cursor, "end": cursor + dur})
-            cursor += dur
+            try:
+                start = base + float(seg["tOffsetMs"]) / 1000.0 if "tOffsetMs" in seg else cursor
+                dur = float(seg.get("tDurationMs", 0) or 0) / 1000.0
+                next_start = next((base + float(s["tOffsetMs"]) / 1000.0
+                                   for s in segs[i + 1:] if isinstance(s, dict) and "tOffsetMs" in s), event_end)
+            except (TypeError, ValueError):
+                continue
+            end = start + dur if dur > 0 else next_start
+            if end <= start:
+                end = start + max(0.2, 0.06 * len(token))
+            if not all(math.isfinite(v) for v in (start, end)) or start < 0:
+                continue
+            tokens = token.split()
+            for j, word in enumerate(tokens):
+                words.append({"word": word, "start": start + (end - start) * j / len(tokens),
+                              "end": start + (end - start) * (j + 1) / len(tokens)})
+            cursor = end
     return [w for w in words if w["word"]]
 
 
@@ -231,43 +298,38 @@ def fetch_caption_words(url, timeout=300):
     tmpdir = tempfile.mkdtemp(prefix="stream_caps_")
     try:
         attempts = [
-            (["--sub-format", "vtt/best", "--convert-subs", "vtt"], ".vtt", parse_vtt),
-            (["--sub-format", "json3/best"], ".json3", None),
+            (["--sub-format", "json3"], ".json3", None),
+            (["--sub-format", "vtt"], ".vtt", parse_vtt),
         ]
         for extra, ext, parser in attempts:
             cmd = [
-                "yt-dlp", "--no-playlist", "--skip-download",
+                "yt-dlp", "--ignore-config", "--no-playlist", "--skip-download",
                 "--write-auto-subs", "--write-subs",
                 "--sub-langs", "en.*",
+                *LIVE_REJECT_ARGS,
                 *extra, "-o", os.path.join(tmpdir, f"cap.%(ext)s"), url,
             ]
             proc = _run(cmd, timeout)
-            if proc.returncode != 0:
-                continue
-            paths = sorted(glob.glob(os.path.join(tmpdir, f"*{ext}")))
+            if _rejected_unfinished_live(proc.stderr):
+                raise StreamClipError(LIVE_REFUSAL)
+            # A later track can fail after a usable one has been written.
+            paths = sorted(glob.glob(os.path.join(tmpdir, f"*{ext}")), key=lambda path: (
+                0 if path.endswith(f".en{ext}") else 1 if path.endswith(f".en-orig{ext}") else 2,
+                path,
+            ))
             if not paths:
                 continue
-            path = max(paths, key=os.path.getsize)
-            try:
-                with open(path, "r", encoding="utf-8", errors="replace") as fh:
-                    raw = fh.read()
-            except OSError:
-                continue
-            if parser is not None:
-                words = parser(raw)
-            else:
+            for path in paths:
                 try:
-                    words = parse_json3(json.loads(raw))
-                except ValueError:
+                    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                        raw = fh.read()
+                    words = parser(raw) if parser else parse_json3(json.loads(raw))
+                except (OSError, ValueError, TypeError, AttributeError):
                     continue
-            if words:
-                auto = "auto" in os.path.basename(path).lower() or "auto" in (proc.stdout or "").lower()
-                return words, "youtube-auto-captions" if auto else "youtube-captions"
-        raise StreamClipError(
-            "no English captions on that video and no transcript given: "
-            "pick a video with captions, or import the file directly so "
-            "on-device transcription can run"
-        )
+                if words:
+                    auto = "orig" in os.path.basename(path).lower() or "auto" in (proc.stdout or "").lower()
+                    return words, "youtube-auto-captions" if auto else "youtube-captions"
+        raise StreamClipError("English captions are unavailable or could not be downloaded")
     finally:
         for path in glob.glob(os.path.join(tmpdir, "*")):
             try:
@@ -278,6 +340,76 @@ def fetch_caption_words(url, timeout=300):
             os.rmdir(tmpdir)
         except OSError:
             pass
+
+
+def transcribe_url_words(url, timeout=3600, engine="local", api_key=""):
+    """Fetch audio, use the chosen provider, and discard temporary media."""
+    if not is_supported_url(url):
+        raise StreamClipError("unsupported video link")
+    try:
+        from . import transcribe as transcribe_mod
+    except ImportError:
+        import transcribe as transcribe_mod
+    if engine not in ("local", "elevenlabs"):
+        raise StreamClipError("Choose Local Whisper or ElevenLabs in Settings → Engine")
+    if engine == "elevenlabs" and not api_key.strip():
+        raise StreamClipError("ElevenLabs is selected. Save a key with Speech-to-Text access in Settings → API keys.")
+    if engine == "local" and not transcribe_mod.local_available():
+        raise StreamClipError(
+            "Captions unavailable and local speech recognition is not installed. "
+            "Run video-use/setup_local_stt.sh (installed app: add --managed), then retry."
+        )
+    if not shutil.which("ffmpeg"):
+        raise StreamClipError("Captions unavailable; install ffmpeg to extract this video's audio for transcription.")
+    print(f"[STREAM] Captions unavailable; downloading audio for {engine} transcription", file=sys.stderr)
+    with tempfile.TemporaryDirectory(prefix="stream_audio_") as tmpdir:
+        last_error = "audio download produced no media"
+        for extra in ([], ["--extractor-args", "youtube:player_client=android"],
+                      ["--extractor-args", "youtube:player_client=ios"]):
+            proc = _run([
+                "yt-dlp", "--ignore-config", "--no-playlist", "--no-progress",
+                "--socket-timeout", "30", "--retries", "3", "--fragment-retries", "3",
+                *LIVE_REJECT_ARGS,
+                "-f", "bestaudio/best", *extra,
+                "-o", os.path.join(tmpdir, "audio.%(ext)s"), url,
+            ], timeout)
+            if _rejected_unfinished_live(proc.stderr):
+                raise StreamClipError(LIVE_REFUSAL)
+            media = [p for p in glob.glob(os.path.join(tmpdir, "audio.*"))
+                     if not p.endswith((".part", ".ytdl", ".temp")) and os.path.getsize(p) > 0]
+            if proc.returncode == 0 and media:
+                break
+            last_error = _clean_download_error(proc.stderr).replace("clip download failed", "audio download failed")
+            for path in glob.glob(os.path.join(tmpdir, "*")):
+                if os.path.isfile(path):
+                    os.remove(path)
+        else:
+            raise StreamClipError(last_error)
+        print(f"[STREAM] Transcribing source audio with {engine}; long videos may take several minutes", file=sys.stderr)
+        try:
+            if engine == "local":
+                doc = transcribe_mod.transcribe_local(media[0])
+            else:
+                doc = transcribe_mod.transcribe_file(media[0], api_key)
+        except (transcribe_mod.TranscribeError, OSError, subprocess.TimeoutExpired) as exc:
+            label = "Local" if engine == "local" else "ElevenLabs"
+            raise StreamClipError(f"{label} transcription failed: {exc}. Check transcription setup in Settings and retry.") from exc
+        words = transcribe_mod.normalize_words(doc)
+        if not words:
+            raise StreamClipError("No speech was detected in this video's audio; clip suggestions need spoken content.")
+        return words, "local-whisper" if engine == "local" else f"elevenlabs:{transcribe_mod.SCRIBE_MODEL}"
+
+
+def fetch_transcript_words(url, engine="local", api_key=""):
+    """Prefer captions; a caption failure must not block audio-based analysis."""
+    try:
+        return fetch_caption_words(url)
+    except StreamClipError as exc:
+        if LIVE_REFUSAL in str(exc):
+            raise
+        if engine == "local":
+            return transcribe_url_words(url)
+        return transcribe_url_words(url, engine=engine, api_key=api_key)
 
 
 def _word_start(item):
@@ -547,6 +679,15 @@ def _clean_download_error(stderr):
     return f"clip download failed ({detail or 'unknown error'})"
 
 
+def _write_source_marker(output, url, start, end):
+    """Mark ``output`` as an app download so Settings > Storage can clean it up."""
+    try:
+        with open(output + ".source.json", "w", encoding="utf-8") as fh:
+            json.dump({"kind": "stream_clip", "url": url, "start": start, "end": end}, fh)
+    except OSError:
+        pass  # The clip itself is fine; it just won't be listed for cleanup.
+
+
 def download_section(url, start, end, output, timeout=3600):
     """Download one ``start``–``end`` window via yt-dlp sections.
 
@@ -556,6 +697,13 @@ def download_section(url, start, end, output, timeout=3600):
     """
     if end <= start:
         raise StreamClipError("clip end must be after clip start")
+    output = os.path.abspath(output)
+    parent = os.path.dirname(output)
+    if parent:
+        try:
+            os.makedirs(parent, exist_ok=True)
+        except OSError as exc:
+            raise StreamClipError(f"Cannot create clip folder: {exc}")
     section = f"*{format_section_time(start)}-{format_section_time(end)}"
     client_attempts = [
         [],
@@ -583,6 +731,7 @@ def download_section(url, start, end, output, timeout=3600):
             timeout,
         )
         if proc.returncode == 0 and os.path.isfile(output):
+            _write_source_marker(output, url, start, end)
             return output
         last_error = _clean_download_error(proc.stderr)
     raise StreamClipError(last_error)
@@ -615,6 +764,8 @@ def build_parser():
     parser.add_argument("--output", default=None, help="Download destination file.")
     parser.add_argument("--words", default=None,
                         help="Local transcript JSON (transcribe.py shape); skips caption fetch.")
+    parser.add_argument("--engine", choices=("local", "elevenlabs"), default="local")
+    parser.add_argument("--elevenlabs-key", default=os.environ.get("PIXEL_ELEVENLABS_KEY", ""))
     parser.add_argument("--duration", type=float, default=0.0, help="Source duration override.")
     parser.add_argument("--agent", default=None,
                         help="Editing agent for cut selection (claude|codex|agy|grok); "
@@ -660,11 +811,11 @@ def main(argv=None):
                   file=sys.stderr)
             return 2
         try:
-            download_section(args.url, args.start, args.end, args.output)
+            saved = download_section(args.url, args.start, args.end, args.output)
         except StreamClipError as exc:
             print(f"stream_clip.py: {exc}", file=sys.stderr)
             return 1
-        print(json.dumps({"output": args.output, "start": args.start, "end": args.end}))
+        print(json.dumps({"output": saved, "start": args.start, "end": args.end}))
         return 0
 
     # Default / --suggest: find the best windows.
@@ -685,16 +836,11 @@ def main(argv=None):
             print(f"stream_clip.py: {exc}", file=sys.stderr)
             return 1
         if meta.get("is_live"):
-            print(
-                "stream_clip.py: that stream is live right now: "
-                "clip finding needs the finished VOD — "
-                "watch this link and retry after it ends",
-                file=sys.stderr,
-            )
+            print(f"stream_clip.py: {LIVE_REFUSAL}", file=sys.stderr)
             return 1
         duration = duration or meta.get("duration", 0.0)
         try:
-            words, source = fetch_caption_words(args.url)
+            words, source = fetch_transcript_words(args.url, args.engine, args.elevenlabs_key)
         except StreamClipError as exc:
             print(f"stream_clip.py: {exc}", file=sys.stderr)
             return 1
@@ -702,9 +848,8 @@ def main(argv=None):
         print("stream_clip.py: give --url or --words", file=sys.stderr)
         return 2
 
-    # Cut selection mirrors short_pipeline: the editing agent plans the
-    # clips from the transcript takes; any agent failure falls back to
-    # heuristic scoring so analysis never depends on agent success.
+    # A selected editing model must actually plan the clips. Local scoring
+    # is used only when Auto was explicitly selected.
     picker = "heuristic"
     picker_note = ""
     if wants_agent_clips(args.agent):
@@ -720,17 +865,8 @@ def main(argv=None):
             )
             picker = f"agent:{args.agent.strip().lower()}"
         except StreamClipError as exc:
-            if custom_prompt:
-                print(f"stream_clip.py: custom prompt could not be applied: {exc}", file=sys.stderr)
-                return 1
-            picker_note = str(exc)
-            print(f"[STREAM] {exc}; using heuristic scoring", file=sys.stderr)
-            clips = suggest_clips(
-                words, duration,
-                threshold=args.threshold, min_length=args.min_length,
-                max_length=args.max_length, max_clips=args.max_clips,
-                min_gap=args.min_gap,
-            )
+            print(f"stream_clip.py: {exc}; choose an available model or Auto and retry", file=sys.stderr)
+            return 1
     else:
         clips = suggest_clips(
             words, duration,

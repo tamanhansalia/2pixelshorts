@@ -18,8 +18,8 @@ export const Field: React.FC<{
   className?: string;
 }> = ({ label, hint, action, children, className }) => {
   return (
-    <HeroTextField fullWidth className={className}>
-      <div className="flex min-h-5 items-center justify-between gap-2">
+    <HeroTextField fullWidth className={`min-w-0 gap-2 ${className ?? ""}`}>
+      <div className="flex min-h-5 flex-wrap items-center justify-between gap-x-3 gap-y-1">
         <HeroLabel>{label}</HeroLabel>
         {action}
       </div>

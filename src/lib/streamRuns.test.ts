@@ -1,15 +1,23 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  LIVE_WATCH_INTERVAL_MS,
+  armWatchLive,
   blankStreamRun,
+  clearWatchLive,
   emptyStreamRunStore,
   getStreamRun,
+  isLiveCheckDue,
+  isLiveVodReady,
   isWatchableLiveRun,
+  liveUrlsDueForCheck,
   mostRecentUsableRun,
   normalizeStreamUrl,
+  recordLiveCheck,
   removeStreamRun,
   streamSidebarItems,
   upsertStreamRun,
+  watchableLiveUrls,
 } from "./streamRuns.ts";
 
 const RESULT = {
@@ -169,6 +177,32 @@ describe("isWatchableLiveRun", () => {
     };
     assert.equal(isWatchableLiveRun(vod), false);
     assert.equal(isWatchableLiveRun(null), false);
+  });
+
+  it("arms watching, records checks, and lists due URLs", () => {
+    let store = armWatchLive(emptyStreamRunStore(), RESULT.url);
+    store = {
+      ...store,
+      runs: { ...store.runs, [RESULT.url]: { ...store.runs[RESULT.url], probe: liveProbe } },
+    };
+    assert.equal(isWatchableLiveRun(store.runs[RESULT.url]), true);
+    assert.deepEqual(watchableLiveUrls(store), [RESULT.url]);
+    assert.equal(isLiveVodReady(liveProbe), false);
+    assert.equal(isLiveVodReady({ ...liveProbe, is_live: false, duration: 3600 }), true);
+    const now = Date.parse(store.runs[RESULT.url].lastCheckedAt ?? "") || Date.now();
+    assert.equal(isLiveCheckDue(store.runs[RESULT.url], now), false);
+    assert.equal(isLiveCheckDue(store.runs[RESULT.url], now + LIVE_WATCH_INTERVAL_MS), true);
+    store = recordLiveCheck(store, RESULT.url, { ...liveProbe, is_live: false, duration: 3600 });
+    assert.equal(store.runs[RESULT.url].watchLive, false);
+    assert.equal(isWatchableLiveRun(store.runs[RESULT.url]), false);
+    store = armWatchLive(emptyStreamRunStore(), RESULT.url);
+    store = {
+      ...store,
+      runs: { ...store.runs, [RESULT.url]: { ...store.runs[RESULT.url], probe: liveProbe, lastCheckedAt: null } },
+    };
+    assert.deepEqual(liveUrlsDueForCheck(store), [RESULT.url]);
+    store = clearWatchLive(store, RESULT.url);
+    assert.equal(store.runs[RESULT.url].watchLive, false);
   });
 
   it("marks sidebar rows live/watching and reopens watched runs", () => {

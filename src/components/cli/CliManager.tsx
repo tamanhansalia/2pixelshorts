@@ -1,3 +1,4 @@
+import { notify } from "../../lib/notify";
 import { parseCliArguments } from "../../lib/cliArgs";
 import React, { useEffect, useState } from "react";
 import {
@@ -86,7 +87,9 @@ export const CliManager: React.FC<CliManagerProps> = ({
       const argsArray = parseCliArguments(cmdArgs);
       const res = await onRunCommand(selectedTool, argsArray);
       setCmdResult(res);
+      notify(res.success ? "Command completed" : "Command failed", res.success ? "Output is available in the console." : res.stderr || `Exited with code ${res.code}`, res.success ? "success" : "error");
     } catch (err: unknown) {
+      notify("Command failed", err instanceof Error ? err.message : "Execution failed", "error");
       setCmdResult({
         success: false,
         code: -1,
@@ -399,7 +402,7 @@ export const CliManager: React.FC<CliManagerProps> = ({
               ))}
             </div>
           </div>
-          <div className="grid grid-cols-1 items-end gap-2 p-3 sm:grid-cols-[minmax(0,14rem)_minmax(0,1fr)_auto]">
+          <div className="cli-command-form grid grid-cols-1 items-end gap-3 p-4">
             <div className="min-w-0">
               <Label className="mb-1.5 block text-xs font-medium text-foreground">
                 Tool

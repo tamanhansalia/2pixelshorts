@@ -16,12 +16,29 @@ so the backend's relative lookups resolve on every machine:
 | `helpers/agent_edit.py` | Agent-driven cut selection: builds an edit prompt from takes + channel context, invokes an agent CLI headlessly, validates the returned EDL |
 | `helpers/render.py` | ffmpeg core: temporal framing, grade, synchronized EDL assembly, subtitle burn, output validation |
 | `helpers/framing.py` | Offline YuNet face tracking, webcam border detection, speaker inset framing, full-frame fit fallback, seam captions and per-output `.framing.json` reports |
+| `helpers/automatic_edit.py` | Studio options → silence/retake cleanup, AI highlights, or full recording; failures are reported without a substitute export |
+| `helpers/transcript_edit.py` | Word-safe speech ranges, conservative repeated-take detection, and legacy explicit-plan validation |
 | `helpers/review.py` | Post-render review grounded in measured output facts (probe + `words.json` / `edl.json` / `takes_packed.md` sidecars) |
-| `helpers/trending.py` | Trending Shorts keywords via YouTube Data API (`search.list`, view-ordered, 24h cache, graceful without a key) |
+| `helpers/trending.py` | Niche trends: rising Shorts terms via YouTube Data API (`search.list` + `videos.list` views-per-hour weighting, 24h cache) plus free YouTube autocomplete queries (no key; `PIXEL_DISABLE_SUGGEST=1` turns it off) |
+| `helpers/seo.py` | SEO rules shared by every package: hook panel + title linter (adapted from the MIT [youtube-agent-skill](https://github.com/Jakeschincariol/youtube-agent-skill)), 0-100 score (title 40 · hook 15 · description 30 · hashtags 10 · tags 5), hashtag and tag budgets |
 | `helpers/grade.py` | Grade preset → ffmpeg `-vf` filter map (`warm_cinematic`, `neutral_punch`, `vertical_clean`) |
-| `helpers/transcribe.py` | ElevenLabs Scribe → word-level JSON (offline-safe placeholder when no key) |
+| `helpers/transcribe.py` | Selected Local Whisper or ElevenLabs Scribe → word-level JSON; explicit provider failures stop processing |
 | `helpers/pack_transcripts.py` | Word JSON → `takes_packed.md` editorial cut sheet |
-| `helpers/stream_clip.py` | Stream clip finder: probe link → captions → agent-planned clips (`--agent`, heuristic fallback; `--probe` / `--suggest` / `--download --start/--end`) |
+| `helpers/stream_clip.py` | Stream clip finder: probe link → captions or local audio transcription → clip suggestions (selected `--agent` or Auto scoring; `--probe` / `--suggest` / `--download --start/--end`) |
+
+YouTube/VOD clip analysis tries English captions first. If captions are missing,
+malformed, or blocked, it downloads the source audio and transcribes it with the
+transcription provider selected in Settings → Engine. Local Whisper uses the
+cached model; ElevenLabs uploads extracted audio using the saved API key. Long videos can
+take several minutes; temporary audio is removed after success or failure.
+Long recordings are transcribed in five-minute windows with overlapping context,
+reusing one model and mapping word timestamps back to the original video. This
+keeps speech-detection memory bounded instead of processing an entire VOD at once.
+This fallback requires `yt-dlp`, `ffmpeg`, and either local transcription setup or
+an ElevenLabs key, according to the selected provider.
+Missing dependencies, download restrictions, and audio without detectable speech
+produce an actionable error. A selected editing agent receives the resulting
+transcript; Auto uses local scoring. Analysis is based on speech, not visual scenes.
 
 ## Prerequisites
 
@@ -58,7 +75,7 @@ Transcription runs in two modes:
 - **ElevenLabs Scribe** (cloud, most accurate): set the key in the app
   under Settings → API keys → ElevenLabs Scribe.
 - **Local whisper** (on-device, no key, no uploads): one-time setup
-  downloads faster-whisper + the tiny.en model (~300 MB total) into the
+  downloads faster-whisper + the small.en model into the
   project env `video-use/.venv` (gitignored). The Tauri backend prefers
   this interpreter automatically whenever it exists:
 
@@ -67,27 +84,52 @@ cd video-use
 ./setup_local_stt.sh
 ```
 
-Engine selection is automatic (`--engine auto`): ElevenLabs when a key
-is set, else local whisper when installed, else a placeholder (clean
-video, no captions). Force one with `--engine elevenlabs|local` on
-`transcribe.py` / `short_pipeline.py`; `--local-model` overrides
-`tiny.en` (e.g. `base.en` for better accuracy).
+Settings → Engine offers **Local Whisper** (default) and **ElevenLabs API**.
+The choice saves automatically and controls exports, source transcripts, video
+analysis and YouTube audio fallback. Saving a key alone never enables cloud use.
+API keys remain in the OS credential vault; local jobs receive no cloud key.
+ElevenLabs uses the same Speech-to-Text API as
+[upstream video-use](https://github.com/browser-use/video-use/blob/main/helpers/transcribe.py):
+`POST https://api.elevenlabs.io/v1/speech-to-text`, model `scribe_v1`, word
+timestamps, diarization and audio event tags. A key needs Speech-to-Text access.
+Only extracted mono audio is uploaded, with disk-backed multipart handling for
+long recordings. API allowance depends on the user's ElevenLabs account.
+The cloud provider needs Python and FFmpeg; installing Whisper or downloading
+a local model is not required to use ElevenLabs.
+
+The desktop app always supplies `--engine local|elevenlabs`. Missing keys,
+provider errors and exhausted quota stop the operation rather than switching
+providers. Legacy standalone CLI `--engine auto` retains its old behavior.
+`--local-model` overrides
+the most accurate locally cached English model (`small.en`, then `base.en`, then `tiny.en`). Rendering never downloads a model.
+
+See [the provider implementation plan](../docs/transcription-providers.md) for
+the routing and verification details.
 
 ## Cut selection order
 
-`short_pipeline.py` picks the cut from the first available source:
+Studio sends the selected `--edit-strategy` at export time:
 
-1. `--edl file.json` — explicit multi-segment EDL (validated, budget-enforced).
-2. `--cut-start/--cut-end` — exact manual single-segment trim.
-3. `--agent <id>` — agent-planned EDL from transcript takes (needs a
-   transcript: ElevenLabs key or local whisper; any agent failure
-   falls back to 4).
-4. Automatic head-cut (first `--duration` seconds).
+- **Clean up** preserves the complete story, removing long pauses and earlier
+  repeated takes according to the two cleanup controls. It has no duration cap.
+- **AI highlight** asks the selected CLI for a focused moment within the chosen
+  duration. Overlong segments are excluded; a plan with no usable segment gets
+  one correction attempt, then fails visibly. Word-safe boundaries allow up to
+  0.25 seconds of tolerance. A source already below the target can legitimately
+  retain the same content as Cleanup.
+- **Keep full video** preserves the entire timeline, including silence. With
+  captions off and no custom instructions, it does not invoke transcription.
+  Explicit custom instructions can still request cuts.
 
-When Studio sends zero for an automatic edit and no agent EDL is available,
-the automatic cut is limited to the first 30 seconds. Each output owns
-`OUTPUT.mp4.words.json`, `OUTPUT.mp4.edl.json`, and
-`OUTPUT.mp4.takes_packed.md`, preventing concurrent renders from sharing evidence.
+Automatic re-exports use separate filenames when a path is already recorded in
+render history, so comparing modes does not overwrite the earlier export.
+Manually chosen output paths remain under the user's control.
+
+Standalone CLI callers can also supply `--edit-plan`, `--edl`, or manual trim
+ranges. These cannot be combined with `--edit-strategy`. The legacy path without
+an explicit strategy can fall back to a head cut; Studio mode failures never do.
+Each output owns `OUTPUT.mp4.words.json`, `OUTPUT.mp4.edl.json`,
+`OUTPUT.mp4.edit.json` (automation), and `OUTPUT.mp4.takes_packed.md`.
 The review helper still reads legacy shared sidecars for older exports.
 
 Native subprocesses receive transcription/trends keys through environment
@@ -101,11 +143,35 @@ Importing a source generates its initial metadata locally. Explicit re-analysis
 or rendering with a selected editing model can send transcript and channel
 context to that model's provider.
 
-## Custom prompts and YouTube references
+## Studio automation
 
-Studio → Style → **Custom prompt** saves instructions for the current short
-and passes them to the selected editing model in the background video-use
-pipeline. Use prompts for source selection, spoken hooks, topic, and pacing.
+Studio has five stages: Video → Edit & format → Captions → Title & tags → Export.
+Edit & format keeps the AI CLI selector visible and uses its configured model
+automatically, alongside the optional **Add custom instructions** switch. Disabling instructions keeps
+the text saved but excludes it from the render request.
+No transcript editor or written prompt is required. Studio sends `--edit-strategy`
+to this repository's `short_pipeline.py` through the native background worker:
+
+- `cleanup` (default): transcribe once, remove long pauses and earlier repeated
+  takes, preserve the whole story without a duration cap.
+- `highlights`: ask the selected editing CLI for a coherent short at the chosen
+  30/60/90-second target, protect word boundaries, then apply cleanup.
+- `full`: preserve all footage and apply the selected style and captions.
+
+Cleanup controls map to `--keep-silence` and `--keep-retakes`. All three modes use
+`render_edl` for framing, grading, caption burn, audio joins and output validation.
+`OUTPUT.edit.json` records the actual engine path, strategy, cuts and removals.
+Missing speech detection or failed AI edits fail the job; they cannot silently
+produce a head cut. Browser previews cannot render or report simulated success.
+
+## CLI custom prompts and YouTube references
+
+Studio and CLI callers can combine `--prompt` with any `--edit-strategy`.
+Instructions refine the chosen mode; cleanup and full mode use the source duration
+as their maximum rather than a 30-second highlight budget. Full mode only requests
+cuts when the instructions ask for them. `--model` selects an explicit model supported
+by the chosen CLI; omitting it uses that CLI's default. The legacy CLI path without
+`--edit-strategy` is also supported.
 For example: `Open on my demo, skip the introduction, and use the spoken hook
 structure from https://www.youtube.com/watch?v=VIDEO_ID_HERE as a reference.`
 
@@ -151,6 +217,7 @@ python3 helpers/agent_edit.py --agent claude --probe
 cd video-use
 python3 helpers/short_pipeline.py --help
 python3 helpers/short_pipeline.py --input in.mp4 --output dummy.mp4 --generate-seo-only
+python3 helpers/short_pipeline.py --input in.mp4 --output dummy.mp4 --generate-seo-only --trend-terms "deadpool|tokio" --winning-titles "Rust in 60s"
 python3 helpers/short_pipeline.py --input in.mp4 --output short.mp4 --preset warm_cinematic --duration 30
 python3 helpers/short_pipeline.py --input in.mp4 --output short.mp4 --cut-start 12 --cut-end 40
 python3 helpers/review.py --input short.mp4

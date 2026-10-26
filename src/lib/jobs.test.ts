@@ -2,7 +2,6 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   AUTO_CUT_AGENT_ID,
-  __resetJobSimulationForTests,
   autoCutProbe,
   cancelJob,
   getJobStatus,
@@ -12,6 +11,7 @@ import {
   needsAgentProbe,
   probeAgent,
   renderWarningsFor,
+  seoAgentForPackage,
   startRenderJob,
 } from "./jobs.ts";
 
@@ -21,78 +21,18 @@ const PARAMS = {
   preset_id: "warm_cinematic",
 };
 
-function waitFor(cond: () => boolean, timeoutMs = 5000): Promise<void> {
-  const started = Date.now();
-  return new Promise((resolve, reject) => {
-    const tick = () => {
-      if (cond()) return resolve();
-      if (Date.now() - started > timeoutMs) return reject(new Error("timed out"));
-      setTimeout(tick, 50);
-    };
-    tick();
-  });
-}
-
-describe("render job simulation (browser fallback)", () => {
-  it("streams progress to completion with a result", async () => {
-    __resetJobSimulationForTests();
-    const seen: number[] = [];
-    let finished: unknown = null;
-    const offP = await listenRenderProgress((p) => seen.push(p.progress));
-    const offF = await listenRenderFinished((info) => {
-      finished = info;
-    });
-
-    const id = await startRenderJob(PARAMS);
-    assert.match(id, /^sim-job-/);
-    await waitFor(() => finished !== null);
-
-    const info = finished as { status: string; result: { success: boolean } };
-    assert.equal(info.status, "completed");
-    assert.equal(info.result.success, true);
-    assert.ok(seen.length >= 3, `expected progress events, saw ${seen.length}`);
-    assert.equal(seen[seen.length - 1], 1);
-
-    const status = await getJobStatus(id);
-    assert.equal(status.status, "completed");
-    offP();
-    offF();
-    __resetJobSimulationForTests();
-  });
-
-  it("cancel stops the job and reports cancelled", async () => {
-    __resetJobSimulationForTests();
-    let finished: unknown = null;
-    const offF = await listenRenderFinished((info) => {
-      finished = info;
-    });
-
-    const id = await startRenderJob(PARAMS);
-    const cancelled = await cancelJob(id);
-    assert.equal(cancelled, true);
-    await waitFor(() => finished !== null);
-
-    const info = finished as { status: string; error: string };
-    assert.equal(info.status, "cancelled");
-    assert.match(info.error, /Cancelled/);
-    // Second cancel is a no-op.
-    assert.equal(await cancelJob(id), false);
-    offF();
-    __resetJobSimulationForTests();
-  });
-
-  it("unknown job id raises", async () => {
-    __resetJobSimulationForTests();
-    await assert.rejects(() => getJobStatus("nope"), /Unknown job id/);
-  });
-});
-
-describe("probeAgent fallback", () => {
-  it("reports simulated availability in the browser", async () => {
-    const probe = await probeAgent("claude");
-    assert.equal(probe.agent, "claude");
-    assert.equal(probe.available, true);
-    assert.equal(probe.note, "simulated");
+describe("browser preview cannot invent edits", () => {
+  it("refuses rendering, metadata probing, and model availability", async () => {
+    let progress = 0, finishes = 0;
+    const offP = await listenRenderProgress(() => progress++);
+    const offF = await listenRenderFinished(() => finishes++);
+    await assert.rejects(() => startRenderJob(PARAMS), /desktop app/);
+    await assert.rejects(() => getJobStatus("nope"), /No native render job/);
+    await assert.rejects(() => cancelJob("nope"), /No native render job/);
+    assert.equal(progress, 0);
+    assert.equal(finishes, 0);
+    assert.equal((await probeAgent("claude")).available, false);
+    offP(); offF();
   });
 });
 
@@ -103,6 +43,54 @@ describe("auto cut probe", () => {
     const probe = autoCutProbe();
     assert.equal(probe.agent, AUTO_CUT_AGENT_ID);
     assert.equal(probe.available, true);
+  });
+});
+
+describe("seo agent for the title package", () => {
+  it("uses an installed CLI when the cut is Auto", () => {
+    assert.equal(
+      seoAgentForPackage(AUTO_CUT_AGENT_ID, {
+        claude: { available: false },
+        codex: { available: true },
+      }),
+      "codex",
+    );
+  });
+
+  it("keeps a chosen CLI that is installed", () => {
+    assert.equal(
+      seoAgentForPackage("grok", {
+        claude: { available: true },
+        grok: { available: true },
+      }),
+      "grok",
+    );
+  });
+
+  it("skips a chosen CLI that the probe rejected", () => {
+    assert.equal(
+      seoAgentForPackage("grok", {
+        grok: { available: false },
+        agy: { available: true },
+      }),
+      "agy",
+    );
+  });
+
+  it("composes from the transcript when no CLI is installed", () => {
+    assert.equal(
+      seoAgentForPackage("auto", {
+        claude: { available: false },
+        codex: { available: false },
+        agy: { available: false },
+        grok: { available: false },
+      }),
+      undefined,
+    );
+  });
+
+  it("tries Claude before the probe returns", () => {
+    assert.equal(seoAgentForPackage("auto", {}), "claude");
   });
 });
 

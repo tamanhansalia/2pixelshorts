@@ -1,6 +1,7 @@
 import { invoke } from "./invoke.ts";
+import { transcriptionInvokeParams, type TranscriptionProvider } from "./transcription.ts";
 import { isTauri } from "./ipc.ts";
-import type { CommandOutput } from "../types/index.ts";
+import type { CommandOutput, VideoMetadata } from "../types/index.ts";
 
 /** One auto-found clip window (seconds on the source timeline). */
 export interface StreamClip {
@@ -25,6 +26,8 @@ export interface StreamProbe {
 }
 
 export interface SuggestStreamClipsOptions {
+  transcriptionProvider?: TranscriptionProvider;
+  elevenlabsKey?: string;
   agentId?: string;
   channelContext?: string;
   promptHook?: string;
@@ -242,6 +245,122 @@ export function dirPrefixOf(path: string): string {
   return slash >= 0 ? clean.slice(0, slash + 1) : "";
 }
 
+/** True for POSIX `/...` and Windows `C:\...` / `C:/...` roots. */
+export function isAbsoluteMediaPath(path: string): boolean {
+  const clean = (path || "").trim();
+  return clean.startsWith("/") || /^[A-Za-z]:[\\/]/.test(clean);
+}
+
+/** Join a directory prefix with a clip file name.
+ *
+ * Relative prefixes (YouTube-only studio: empty input/output) are dropped
+ * so the native helper can place the file in `~/.2pixelshorts/clips`. */
+export function clipWorkPath(dirPrefix: string, fileName: string): string {
+  const name = (fileName || "").trim();
+  if (!name) return "";
+  const dir = dirPrefix || "";
+  if (!dir || !isAbsoluteMediaPath(dir)) return name;
+  if (dir.endsWith("/") || dir.endsWith("\\")) return `${dir}${name}`;
+  const sep = dir.includes("\\") && !dir.includes("/") ? "\\" : "/";
+  return `${dir}${sep}${name}`;
+}
+
+/** Prefer the absolute path the helper actually wrote. */
+export function resolvedClipOutput(fetched: CommandOutput, requested: string): string {
+  const text = (fetched.stdout || "").trim();
+  if (!text) return requested;
+  const tryParse = (raw: string): string | null => {
+    try {
+      const parsed = JSON.parse(raw) as { output?: unknown };
+      return typeof parsed.output === "string" && parsed.output.trim()
+        ? parsed.output.trim()
+        : null;
+    } catch {
+      return null;
+    }
+  };
+  const direct = tryParse(text);
+  if (direct) return direct;
+  const start = text.lastIndexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start >= 0 && end > start) {
+    const nested = tryParse(text.slice(start, end + 1));
+    if (nested) return nested;
+  }
+  return requested;
+}
+
+/** One selected stream window to download as a Studio source. */
+export interface StreamClipImportSpec {
+  start: number;
+  end: number;
+  /** Skip-toast label (`Clip 3`). */
+  label: string;
+  /** Sidebar title once imported (clip reason). */
+  title: string;
+  outputName: string;
+}
+
+export interface ImportedClipFile {
+  inputPath: string;
+  metadata: VideoMetadata | null;
+  title: string;
+}
+
+/**
+ * Download each selected window on its own. A throw or yt-dlp miss on
+ * one clip must not discard clips that already landed on disk.
+ */
+export async function downloadStreamClipsAsSources(opts: {
+  url: string;
+  dirPrefix: string;
+  clips: StreamClipImportSpec[];
+  fetchClip?: (
+    url: string,
+    start: number,
+    end: number,
+    output: string,
+  ) => Promise<CommandOutput>;
+  probe?: (path: string) => Promise<VideoMetadata>;
+  onProgress?: (current: number, total: number) => void;
+  onSkip?: (label: string, message: string) => void;
+}): Promise<ImportedClipFile[]> {
+  const fetchClip = opts.fetchClip ?? fetchStreamClip;
+  const imported: ImportedClipFile[] = [];
+  const total = opts.clips.length;
+  for (let n = 0; n < total; n++) {
+    const clip = opts.clips[n];
+    opts.onProgress?.(n + 1, total);
+    const requested = clipWorkPath(opts.dirPrefix, clip.outputName);
+    try {
+      const fetched = await fetchClip(opts.url, clip.start, clip.end, requested);
+      if (!fetched.success) {
+        opts.onSkip?.(
+          clip.label,
+          fetched.stderr.trim().slice(0, 220) || "clip download failed",
+        );
+        continue;
+      }
+      const inputPath = resolvedClipOutput(fetched, requested);
+      let metadata: VideoMetadata | null = null;
+      if (opts.probe) {
+        try {
+          metadata = await opts.probe(inputPath);
+        } catch {
+          metadata = null;
+        }
+      }
+      imported.push({ inputPath, metadata, title: clip.title });
+    } catch (err) {
+      opts.onSkip?.(
+        clip.label,
+        err instanceof Error ? err.message : "clip download failed",
+      );
+    }
+  }
+  return imported;
+}
+
 function toResult(raw: {
   url: string;
   title: string;
@@ -271,17 +390,7 @@ export async function probeStream(url: string): Promise<StreamProbe> {
   if (isTauri()) {
     return await invoke<StreamProbe>("probe_stream", { url: clean });
   }
-  await new Promise((r) => setTimeout(r, 400));
-  return {
-    url: clean,
-    title: "Sample stream — simulated probe",
-    channel: "@sample-channel",
-    thumbnail: null,
-    duration: 3720,
-    view_count: 128400,
-    upload_date: "20260115",
-    is_live: false,
-  };
+  throw new Error("Open the 2pixelshorts desktop app to analyze and download source footage with video-use.");
 }
 
 export async function suggestStreamClips(
@@ -302,6 +411,7 @@ export async function suggestStreamClips(
       clips: StreamClip[];
     }>("suggest_stream_clips", {
       url: clean,
+      ...transcriptionInvokeParams(opts.elevenlabsKey, opts.transcriptionProvider),
       agentId: opts.agentId || null,
       channelContext: opts.channelContext || null,
       promptHook: opts.promptHook || null,
@@ -313,40 +423,7 @@ export async function suggestStreamClips(
     });
     return toResult(raw);
   }
-  await new Promise((r) => setTimeout(r, 600));
-  return {
-    url: clean,
-    title: "Sample stream — simulated analysis",
-    channel: "@sample-channel",
-    duration: 3720,
-    transcriptSource: "simulated",
-    wordsCount: 8400,
-    picker: opts.agentId ? `agent:${opts.agentId}` : "heuristic",
-    pickerNote: "",
-    clips: [
-      {
-        start: 745,
-        end: 778,
-        score: 0.91,
-        reason: "Strong hook — asks a question",
-        text: "What is the secret nobody tells you about retention? Here are the three patterns that actually hold viewers past thirty seconds …",
-      },
-      {
-        start: 1502,
-        end: 1538,
-        score: 0.84,
-        reason: "Self-contained point with a clean close",
-        text: "The second pattern is pacing: cut every silence longer than half a second and the average view duration climbs …",
-      },
-      {
-        start: 2310,
-        end: 2344,
-        score: 0.77,
-        reason: "Fast-paced delivery worth clipping",
-        text: "Stop exporting at the wrong bitrate. These three settings fixed every blurry upload on this channel …",
-      },
-    ],
-  };
+  throw new Error("Open the 2pixelshorts desktop app to analyze and download source footage with video-use.");
 }
 
 export async function fetchStreamClip(
@@ -363,12 +440,5 @@ export async function fetchStreamClip(
       output,
     });
   }
-  await new Promise((r) => setTimeout(r, 500));
-  return {
-    success: true,
-    code: 0,
-    stdout: `[SIMULATED STREAM FETCH]\n$ yt-dlp --download-sections "*${start}-${end}" ${url}\nOutput: ${output}`,
-    stderr: "",
-    fallback_used: false,
-  };
+  throw new Error("Open the 2pixelshorts desktop app to analyze and download source footage with video-use.");
 }

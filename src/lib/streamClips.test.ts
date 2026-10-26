@@ -8,8 +8,12 @@ import {
   STREAM_REVIEW_MODELS,
   aspectDims,
   clipOutputPath,
+  clipWorkPath,
   dirPrefixOf,
+  downloadStreamClipsAsSources,
   effectiveLayoutForAspect,
+  isAbsoluteMediaPath,
+  resolvedClipOutput,
   formatClipRange,
   formatClipTime,
   isLiveStreamError,
@@ -169,6 +173,97 @@ describe("dirPrefixOf", () => {
     assert.equal(dirPrefixOf("C:\\vids\\final_short.mp4"), "C:\\vids\\");
     assert.equal(dirPrefixOf("/tmp/out.mp4"), "/tmp/");
     assert.equal(dirPrefixOf("final_short.mp4"), "");
+  });
+});
+
+describe("clip work paths", () => {
+  it("keeps absolute folders and drops relative YouTube-only prefixes", () => {
+    assert.equal(isAbsoluteMediaPath("/tmp/out.mp4"), true);
+    assert.equal(isAbsoluteMediaPath("C:\\vids\\a.mp4"), true);
+    assert.equal(isAbsoluteMediaPath("final_short.mp4"), false);
+    assert.equal(clipWorkPath("/tmp/", "talk_clip1.mp4"), "/tmp/talk_clip1.mp4");
+    assert.equal(clipWorkPath("C:\\vids\\", "talk_clip1.mp4"), "C:\\vids\\talk_clip1.mp4");
+    assert.equal(clipWorkPath("", "talk_clip1.mp4"), "talk_clip1.mp4");
+    assert.equal(clipWorkPath("relative/", "talk_clip1.mp4"), "talk_clip1.mp4");
+  });
+
+  it("reads the helper's absolute output from fetch stdout", () => {
+    const fetched = {
+      success: true,
+      code: 0,
+      stdout: JSON.stringify({ output: "/Users/me/.2pixelshorts/clips/talk_clip1.mp4", start: 1, end: 2 }),
+      stderr: "",
+      fallback_used: false,
+    };
+    assert.equal(
+      resolvedClipOutput(fetched, "talk_clip1.mp4"),
+      "/Users/me/.2pixelshorts/clips/talk_clip1.mp4",
+    );
+    assert.equal(
+      resolvedClipOutput({ ...fetched, stdout: "not json" }, "talk_clip1.mp4"),
+      "talk_clip1.mp4",
+    );
+  });
+});
+
+describe("downloadStreamClipsAsSources", () => {
+  const clips = [
+    { start: 1, end: 10, label: "Clip 1", title: "Hook", outputName: "a_clip1.mp4" },
+    { start: 20, end: 30, label: "Clip 2", title: "Payoff", outputName: "a_clip2.mp4" },
+    { start: 40, end: 50, label: "Clip 3", title: "CTA", outputName: "a_clip3.mp4" },
+  ];
+
+  it("keeps successful clips when a later download throws", async () => {
+    const skipped: string[] = [];
+    const progress: number[] = [];
+    const imported = await downloadStreamClipsAsSources({
+      url: "https://youtu.be/abcdefghijk",
+      dirPrefix: "/tmp/",
+      clips,
+      fetchClip: async (_url, start, _end, output) => {
+        if (start === 20) throw new Error("Open the 2pixelshorts desktop app");
+        return {
+          success: true,
+          code: 0,
+          stdout: JSON.stringify({ output: `/abs/${output.split(/[\\/]/).pop()}`, start, end: start + 9 }),
+          stderr: "",
+          fallback_used: false,
+        };
+      },
+      probe: async (path) => ({
+        file_path: path,
+        duration_seconds: 9,
+        width: 1080,
+        height: 1920,
+        fps: 30,
+        codec: "h264",
+        audio_channels: 2,
+        file_size_bytes: 1,
+      }),
+      onProgress: (current) => progress.push(current),
+      onSkip: (label, message) => skipped.push(`${label}:${message}`),
+    });
+    assert.deepEqual(imported.map((c) => c.inputPath), ["/abs/a_clip1.mp4", "/abs/a_clip3.mp4"]);
+    assert.equal(imported[0].title, "Hook");
+    assert.equal(imported[0].metadata?.duration_seconds, 9);
+    assert.deepEqual(skipped, ["Clip 2:Open the 2pixelshorts desktop app"]);
+    assert.deepEqual(progress, [1, 2, 3]);
+  });
+
+  it("skips helper failures and still imports the rest", async () => {
+    const imported = await downloadStreamClipsAsSources({
+      url: "https://youtu.be/abcdefghijk",
+      dirPrefix: "",
+      clips: clips.slice(0, 2),
+      fetchClip: async (_url, start, _end, output) => ({
+        success: start !== 1,
+        code: start === 1 ? 1 : 0,
+        stdout: start === 1 ? "" : JSON.stringify({ output }),
+        stderr: start === 1 ? "clip download failed (bot check)" : "",
+        fallback_used: false,
+      }),
+    });
+    assert.deepEqual(imported.map((c) => c.inputPath), ["a_clip2.mp4"]);
   });
 });
 

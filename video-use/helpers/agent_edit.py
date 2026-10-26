@@ -187,7 +187,7 @@ def probe_agent(agent_id):
         }
     try:
         proc = subprocess.run(
-            [path, "--help"], capture_output=True, text=True, timeout=20,
+            [path, "--help"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20,
         )
         help_text = (proc.stdout or "") + (proc.stderr or "")
     except Exception as exc:
@@ -413,14 +413,15 @@ def validate_edl(doc, duration, target_duration=None):
         kept_total = 0.0
         for seg in by_score:
             length = seg["end"] - seg["start"]
-            if kept_total + length <= budget or not kept:
+            if kept_total + length <= budget:
                 kept.append(seg)
                 kept_total += length
         fixed = sorted(kept, key=lambda s: s["start"])
         total = sum(s["end"] - s["start"] for s in fixed)
 
     if not fixed:
-        raise AgentError("EDL contained no usable segments after validation")
+        raise AgentError(f"EDL contained no usable segments within the {budget:g}s target. "
+                         "Select a shorter complete moment; do not return the full recording.")
 
     return {
         "segments": fixed,
@@ -450,7 +451,7 @@ def _invoke_agent(agent_id, prompt, model=None, timeout=300):
         argv = spec["argv"](probe["path"], prompt, model, schema_file)
         try:
             proc = subprocess.run(
-                argv, capture_output=True, text=True, timeout=timeout,
+                argv, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
                 cwd=tmpdir, env=private_agent_env(),
             )
         except subprocess.TimeoutExpired:
@@ -481,15 +482,24 @@ def _invoke_agent(agent_id, prompt, model=None, timeout=300):
 
 
 def run_agent_cut(agent_id, takes_text, duration, target_duration=None,
-                  context=None, hook=None, model=None, timeout=300):
+                  context=None, hook=None, model=None, timeout=300, reference_prompt=None):
     """Run the full agent cut. Returns the validated EDL dict."""
     try:
-        references = reference_mod.resolve_references(hook)
+        # Automatic modes add their own guidance to hook. Validate the user's
+        # 4,000-character allowance and resolve links from their text only.
+        references = reference_mod.resolve_references(hook if reference_prompt is None else reference_prompt)
     except (reference_mod.ReferenceError, ValueError) as exc:
         raise AgentError(str(exc)) from exc
     prompt = build_prompt(takes_text, duration, target_duration, context, hook, references)
-    doc = _invoke_agent(agent_id, prompt, model, timeout)
-    edl = validate_edl(doc, duration, target_duration)
+    for attempt in range(2):
+        doc = _invoke_agent(agent_id, prompt, model, timeout)
+        try:
+            edl = validate_edl(doc, duration, target_duration)
+            break
+        except AgentError as exc:
+            if attempt:
+                raise
+            prompt += f"\nYour previous edit was rejected: {exc}\nReturn a corrected EDL JSON."
     if hook and hook.strip():
         edl["edit_request"] = {"prompt": hook.strip(), "references": references}
     return edl

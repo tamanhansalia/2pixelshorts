@@ -39,6 +39,30 @@ This creates an ignored Python environment and downloads the English `tiny.en`
 speech model. Python and FFmpeg remain runtime requirements for a packaged app;
 see the guide for installing the managed engine environment.
 
+## Studio workflow
+
+Studio keeps one video project across five stages. You can revisit any stage
+after importing a video, and your choices are saved on this computer.
+
+1. **Video:** import a local recording, or find and import clips from a public
+   YouTube or Twitch VOD link with Auto cut or your configured CLI.
+2. **Edit & format:** clean up pauses and repeated takes, find an AI highlight,
+   or keep the entire video. Optionally turn on **Add custom instructions**
+   alongside any mode, including YouTube pacing references. The AI editing CLI
+   selector is always visible and uses the CLI’s configured model automatically.
+   Choose color, aspect ratio, and framing here too.
+3. **Captions:** choose a style, position, size, and casing, or turn captions off.
+   The caption sample demonstrates the style; export to see it on your footage.
+4. **Title & tags:** optionally edit publishing details, review the analysis,
+   apply channel context, or fetch keyword trends.
+5. **Export:** review the settings, choose the output path, and export an MP4.
+   Progress, cancellation, processing details, and render history stay available.
+
+The preview shows the original recording or the latest completed export.
+Finished exports can be opened, revealed in their folder, queued, or sent to
+Social. Custom instructions use your installed CLI and its configured account;
+the provider may charge for AI planning. Video rendering runs locally.
+
 ## Project structure
 
 ```text
@@ -74,7 +98,7 @@ video-use/.venv/Scripts/python.exe -m unittest discover -s video-use/tests
 
 Build the desktop application with `npm run tauri -- build`. Generated bundles
 are under `src-tauri/target/release/bundle/`. Browser development with `npm run dev`
-uses simulated desktop operations; use the native app to test real rendering,
+shows the interface without running local tools; use the native app to test rendering,
 credential storage, file actions, and publishing.
 
 ## Current behavior and limits

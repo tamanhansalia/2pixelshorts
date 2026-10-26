@@ -21,6 +21,7 @@ Exit codes: 0 success, 1 render failure (reported as a failed native job),
 
 import argparse
 import json
+import re
 import os
 import subprocess
 import sys
@@ -35,6 +36,8 @@ try:
     from . import review as review_mod
     from . import seo as seo_mod
     from . import trending as trending_mod
+    from . import transcript_edit as edit_mod
+    from . import automatic_edit as auto_mod
 except ImportError:  # running as `python helpers/short_pipeline.py`
     import render as render_mod
     import transcribe as transcribe_mod
@@ -43,6 +46,8 @@ except ImportError:  # running as `python helpers/short_pipeline.py`
     import review as review_mod
     import seo as seo_mod
     import trending as trending_mod
+    import transcript_edit as edit_mod
+    import automatic_edit as auto_mod
 
 SEO_START = "__SEO_METADATA_START__"
 SEO_END = "__SEO_METADATA_END__"
@@ -59,97 +64,11 @@ def _fit_tag_budget(tags, budget=MAX_SEO_TAG_CHARS):
     return seo_mod.fit_tag_budget(tags, budget=budget)
 
 
-def format_upload_description(hook, overview, highlights, tags, hashtags):
-    """Structured upload description: hook, overview, key points, then the
-    keyword + hashtag block (tags always travel with the description)."""
-    return seo_mod.build_description(hook, overview, highlights, tags,
-                                     hashtags)
-
-
-# ---------------------------------------------------------------------------
-# SEO metadata (mirrors the generateSeoMetadata fallback in src/lib/ipc.ts)
-# ---------------------------------------------------------------------------
-
-def _detect_topic(filename, channel_context):
-    clean = filename.replace("-", " ").replace("_", " ")
-    clean = " ".join(w[:1].upper() + w[1:] for w in clean.split())
-    ctx = (channel_context or "").lower()
-
-    topic = clean or "Video"
-    if "rust" in ctx or "tauri" in ctx:
-        topic = "Rust & Tauri"
-    elif "ai" in ctx or "code" in ctx or "ai" in clean.lower():
-        topic = "AI Developer Tool"
-    elif "saas" in ctx or "startup" in ctx:
-        topic = "Indie SaaS"
-    elif "python" in ctx:
-        topic = "Python Automation"
-    return topic
-
-
-def generate_metadata(input_video, channel_context=None, agent_id=None):
-    """Build the SEO metadata dict for a source video."""
-    base = os.path.basename(input_video or "")
-    filename = os.path.splitext(base)[0] or "video"
-    topic = _detect_topic(filename, channel_context)
-
-    primary_title = f"The Secret {topic} Workflow Nobody Tells You \U0001F92B"
-    alt1 = f"Stop Doing This With {topic} (Do This Instead) \u274C"
-    alt2 = f"This New {topic} Feels Like Cheating \u26A1"
-    alt3 = f"How to Master {topic} in 60 Seconds \U0001F680"
-
-    tags = _fit_tag_budget(list(dict.fromkeys([
-        topic.lower(), f"{topic.lower()} tutorial", f"{topic.lower()} shorts",
-        "shorts", "tech", "coding", "developer", "software engineering",
-        f"{topic.lower()} tips", "ai tools", "productivity", "webdev",
-        "programming tips", "trending", "viral", "short", "how to",
-        "beginners guide", "explained", "crash course",
-    ]))[:MAX_SEO_TAGS])
-    hashtags = ["#" + t.replace(" ", "") for t in tags[:MAX_SEO_HASHTAGS]]
-    hook = f"Stop doing this with {topic} \u2014 here is what top engineers do instead."
-    highlights = [
-        f"Core breakthrough with {topic}",
-        "How to optimize performance and save hours",
-        "Pro tips for modern creators",
-    ]
-    niche = channel_context.strip() if channel_context and channel_context.strip() else "daily tech & developer guides"
-
-    description = format_upload_description(
-        hook,
-        f"The complete breakdown on {topic}! In this short, we review the "
-        f"entire workflow from start to finish. \U0001F449 Subscribe for {niche}!",
-        highlights,
-        tags,
-        hashtags,
-    )
-
-    return {
-        "title": alt2,
-        "title_alternatives": [primary_title, alt1, alt2, alt3],
-        "description": description,
-        "tags": tags,
-        "hashtags": hashtags,
-        "seo_score": 98,
-        "keywords_analyzed": [topic.lower(), "workflow", "optimization", "productivity"],
-        "review_report": {
-            "overall_summary": (
-                f"Reviewed whole video recording ({filename}). Audio pacing is crisp with high "
-                f"speech density focused on {topic}. Identified core breakthrough and practical "
-                "implementation steps."
-            ),
-            "hook_detected": f"Stop doing this with {topic} - here is what top engineers do instead.",
-            "content_highlights": [
-                f"Core breakthrough and architecture breakdown of {topic}",
-                "Performance benchmarks and speed optimizations",
-                "Real-world edge cases to avoid when deploying",
-                "Actionable steps to set this up in under 60 seconds",
-            ],
-            "retention_score": 97,
-            "target_audience": "Engineers, developers, and tech builders aligned with your channel profile.",
-            "suggested_pacing": "Fast-paced punchy cuts with 30ms anti-pop crossfades",
-            "word_count": 142,
-        },
-    }
+def format_upload_description(hook, overview, highlights, hashtags, cta=None):
+    """Upload description with the hook + payoff above the fold and the
+    hashtag line closing it out (see seo.build_description)."""
+    return seo_mod.build_description(hook, overview, highlights, hashtags,
+                                     cta=cta)
 
 
 class SeoError(Exception):
@@ -169,6 +88,8 @@ SEO_SCHEMA = {
         "description": {"type": "string"},
         "tags": {"type": "array", "items": {"type": "string"}},
         "hashtags": {"type": "array", "items": {"type": "string"}},
+        "search_queries": {"type": "array", "items": {"type": "string"}},
+        "pinned_comment": {"type": "string"},
         "hook_detected": {"type": "string"},
         "content_highlights": {
             "type": "array", "items": {"type": "string"},
@@ -176,41 +97,84 @@ SEO_SCHEMA = {
         "overall_summary": {"type": "string"},
     },
     "required": ["title", "title_alternatives", "description", "tags",
-                 "hashtags", "hook_detected", "content_highlights",
-                 "overall_summary"],
+                 "hashtags", "search_queries", "pinned_comment",
+                 "hook_detected", "content_highlights", "overall_summary"],
     "additionalProperties": False,
 }
 
+# Prompt-side caps for the optional market signals.
+MAX_PROMPT_SIGNALS = 10
 
-def build_seo_prompt(takes_text, duration, word_count, context=None):
-    """Build the SEO-review prompt, truncating takes to the prompt budget."""
+
+def _signal_lines(label, items, explain):
+    items = [i.strip() for i in (items or []) if isinstance(i, str) and i.strip()]
+    if not items:
+        return []
+    return [f"{label} ({explain}):"] + [
+        f"- {i[:120]}" for i in items[:MAX_PROMPT_SIGNALS]
+    ]
+
+
+def build_seo_prompt(takes_text, duration, word_count, context=None,
+                     search_queries=None, trend_terms=None,
+                     winning_titles=None):
+    """Build the SEO-review prompt, truncating takes to the prompt budget.
+
+    ``search_queries`` are real autocomplete phrases, ``trend_terms`` come
+    from fast-rising Shorts in the niche, and ``winning_titles`` are this
+    channel's own best performers. All three are hints: the agent may only
+    use one when the transcript actually covers it.
+    """
     lines = [
-        "You are a YouTube Shorts SEO strategist. Read the transcript takes",
-        "from the source video below and write its upload package.",
+        "You are a YouTube Shorts packaging strategist. Read the transcript",
+        "takes from the source video below and write its upload package.",
         f"SOURCE DURATION: {duration:.1f} seconds.",
         f"SPOKEN WORDS: {word_count}.",
     ]
     if context and context.strip():
         lines.append(f"CHANNEL CONTEXT: {context.strip()}")
+    lines += _signal_lines(
+        "REAL SEARCH QUERIES", search_queries,
+        "what people type into YouTube search; aim at one the video covers")
+    lines += _signal_lines(
+        "TRENDING TERMS", trend_terms,
+        "words in fast-rising Shorts in this niche; use only if spoken")
+    lines += _signal_lines(
+        "TITLES THAT WORKED ON THIS CHANNEL", winning_titles,
+        "match their style and specificity, never copy the topic")
     lines += [
         "RULES:",
         "- Output ONLY a JSON object, no markdown fences, no commentary.",
         '- Shape: {"title": "...", "title_alternatives": ["...", ...4],',
         '  "description": "...", "tags": ["...", ...],',
-        '  "hashtags": ["#...", ...], "hook_detected": "opening spoken hook",',
+        '  "hashtags": ["#...", ...], "search_queries": ["...", ...3],',
+        '  "pinned_comment": "...", "hook_detected": "opening spoken hook",',
         '  "content_highlights": ["...", ...4], "overall_summary": "..."}',
         "- Base EVERYTHING on words actually spoken in the takes: quote real",
         "  phrases for the hook, lift real topics for titles and tags. Never",
-        "  invent topics, tools, or claims that are not in the transcript.",
-        "- title <= 100 chars, high-CTR Shorts style: the single best title,",
-        "  plus exactly 4 alternatives ordered best-first.",
-        '- description in this exact structure: opening hook line, blank line,',
-        "  2-4 sentences on what is covered, blank line, '\U0001F4CC Key",
-        "  Highlights:' plus \u2022 bullets, blank line, '\U0001F50D Search",
-        "  Keywords:' plus one comma-separated keyword line, blank line, one",
-        "  hashtag line. The keyword + hashtag block is mandatory.",
-        "- tags: 15-20, most important first, multi-word phrases allowed;",
-        "  content_highlights: exactly 4 short bullets of what is covered.",
+        "  invent topics, tools, numbers, or claims that are not in the",
+        "  transcript.",
+        "- search_queries: the 3 searches this short should win, written the",
+        "  way a real person types them (lowercase, 2-5 words).",
+        "- title: a complete thought, 40-60 characters (hard limit 100).",
+        "  Never a cut-off spoken line or a trailing comma. Put the subject",
+        "  in the first three words, carry the words of the top search query,",
+        "  and prefer a concrete number, name or result over hype words",
+        "  (insane, best, secret, ultimate). At most two ALL-CAPS words.",
+        "  Plus exactly 4 alternatives ordered best-first, each a different",
+        "  complete angle.",
+        "- description: line 1 is the hook, line 2 says what the viewer gets",
+        "  in the words of the search queries (these two lines are all most",
+        "  people see). Then a blank line and up to 4 \u2022 bullets of what",
+        "  is covered, then one call to action line, then a blank line and",
+        "  the hashtag line. NO keyword lists and no 'Search Keywords' block.",
+        "- tags: 5-15, most important first: tool names, spellings and",
+        "  abbreviations people actually type. No unrelated or generic tags",
+        "  (viral, trending, shorts).",
+        "- hashtags: 3-5 specific ones, most important first.",
+        "- pinned_comment: one short question that invites viewers to reply",
+        "  about the topic (no links, no self-promotion).",
+        "- content_highlights: exactly 4 short bullets of what is covered.",
         "TAKES:",
     ]
     header = "\n".join(lines) + "\n"
@@ -233,6 +197,14 @@ def _clean_str_list(value, limit):
     return cleaned
 
 
+def _finish_description(description, hashtags):
+    """Strip any keyword-stuffing block and make sure hashtags close it."""
+    text = seo_mod.strip_keyword_block(description)
+    if hashtags and not any(h in text for h in hashtags[:3]):
+        text = text.rstrip() + "\n\n" + " ".join(hashtags)
+    return text.strip()
+
+
 def validate_seo(doc):
     """Validate + normalize an agent SEO package. Raises SeoError."""
     if not isinstance(doc, dict):
@@ -253,13 +225,7 @@ def validate_seo(doc):
     hashtags = seo_mod.normalize_hashtags(
         tags, _clean_str_list(doc.get("hashtags"), MAX_SEO_HASHTAGS),
         limit=MAX_SEO_HASHTAGS)
-    # The keyword + hashtag block always ships with the description, even
-    # when the agent wrote the prose without it.
-    if "Search Keywords:" not in description:
-        description = (
-            description.strip() + "\n\n\U0001F50D Search Keywords:\n"
-            + ", ".join(tags) + "\n\n" + " ".join(hashtags)
-        )
+    description = _finish_description(description, hashtags)
     hook = doc.get("hook_detected")
     if not isinstance(hook, str) or not hook.strip():
         raise SeoError("SEO package needs a non-empty 'hook_detected'")
@@ -269,12 +235,19 @@ def validate_seo(doc):
     summary = doc.get("overall_summary")
     if not isinstance(summary, str) or not summary.strip():
         raise SeoError("SEO package needs a non-empty 'overall_summary'")
+    # Queries and the pinned comment are optional extras: older agents
+    # (and non-strict CLIs) may omit them without failing the package.
+    queries = seo_mod.clean_search_queries(doc.get("search_queries"))
+    pinned = doc.get("pinned_comment")
+    pinned = pinned.strip()[:500] if isinstance(pinned, str) else ""
     return {
         "title": seo_mod.trim_title(title.strip()),
         "title_alternatives": alternatives,
-        "description": description.strip(),
+        "description": description,
         "tags": tags,
         "hashtags": hashtags,
+        "search_queries": queries,
+        "pinned_comment": pinned,
         "hook_detected": hook.strip()[:200],
         "content_highlights": highlights,
         "overall_summary": summary.strip(),
@@ -306,8 +279,12 @@ def _extract_seo_doc(stdout, agent_id):
 
 
 def run_agent_seo(agent_id, takes_text, duration, word_count, context=None,
-                  model=None, timeout=300):
-    """Ask the agent CLI for the SEO package. Returns the validated dict."""
+                  model=None, timeout=300, signals=None):
+    """Ask the agent CLI for the SEO package. Returns the validated dict.
+
+    ``signals`` optionally carries ``search_queries``, ``trend_terms`` and
+    ``winning_titles`` for the prompt (see build_seo_prompt).
+    """
     agent_id = (agent_id or "").strip().lower()
     spec = agent_mod.AGENTS.get(agent_id)
     if spec is None:
@@ -317,7 +294,13 @@ def run_agent_seo(agent_id, takes_text, duration, word_count, context=None,
     if not probe["available"]:
         raise agent_mod.AgentError(f"agent '{agent_id}' unavailable: {probe['note']}")
 
-    prompt = build_seo_prompt(takes_text, duration, word_count, context)
+    signals = signals or {}
+    prompt = build_seo_prompt(
+        takes_text, duration, word_count, context,
+        search_queries=signals.get("search_queries"),
+        trend_terms=signals.get("trend_terms"),
+        winning_titles=signals.get("winning_titles"),
+    )
 
     schema_file = None
     tmpdir = tempfile.mkdtemp(prefix="agent_seo_")
@@ -329,7 +312,7 @@ def run_agent_seo(agent_id, takes_text, duration, word_count, context=None,
         argv = spec["argv"](probe["path"], prompt, model, schema_file)
         try:
             proc = subprocess.run(
-                argv, capture_output=True, text=True, timeout=timeout,
+                argv, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
                 cwd=tmpdir, env=agent_mod.private_agent_env(),
             )
         except subprocess.TimeoutExpired:
@@ -364,13 +347,50 @@ def run_agent_seo(agent_id, takes_text, duration, word_count, context=None,
                 pass
 
 
-def _top_terms(words, top_n=8):
-    """Rank transcript terms by frequency (stopwords filtered)."""
+# Spoken filler that survives the stopword list but makes useless tags
+# and hashtags (#end, #add). Topic words are never in here.
+WEAK_SEO_TERMS = frozenset(
+    """
+    add end thing things stuff yeah yes okay gonna wanna want something kind lot
+    put take care exist give need know think say said look going come
+    right sure maybe guess mean basically literally actually start
+    sir please hey hi um uh wait hmm huh yup yep
+    """.split()
+)
+
+# Discourse leftovers that make a useless search ("open sir", "okay want")
+# even when they survive the stopword list. A phrase still counts when it
+# also carries a real topic word ("open terminal", "spawn muse").
+QUERY_NOISE = frozenset(
+    """
+    sir okay please yeah yes hey hi um uh wait hmm huh yup yep oh ah
+    """.split()
+)
+
+
+def _content_tokens(tokens):
+    """Topic words a viewer might actually type (filler stripped)."""
+    out = []
+    for raw in tokens or []:
+        tok = (raw or "").lower()
+        if (len(tok) >= 3 and tok not in trending_mod.STOPWORDS
+                and tok not in WEAK_SEO_TERMS and tok not in QUERY_NOISE):
+            out.append(tok)
+    return out
+
+
+def _seo_tokens(words):
     text = " ".join((w.get("word") or "") for w in words or "")
     try:
         tokens = trending_mod.tokenize(text)
     except Exception:
         tokens = []
+    return tokens
+
+
+def _top_terms(words, top_n=8):
+    """Rank transcript terms by frequency (stopwords + filler filtered)."""
+    tokens = [t for t in _seo_tokens(words) if t not in WEAK_SEO_TERMS]
     return [term for term, _ in Counter(tokens).most_common(top_n)]
 
 
@@ -381,39 +401,14 @@ def _top_phrases(words, top_n=6):
     grounded as unigrams while giving tags the multi-word specificity
     Shorts search rewards ("connection pooling" beats "pooling").
     """
-    text = " ".join((w.get("word") or "") for w in words or "")
-    try:
-        tokens = trending_mod.tokenize(text)
-    except Exception:
-        tokens = []
+    tokens = _seo_tokens(words)
     counts = Counter()
     for first, second in zip(tokens, tokens[1:]):
+        # Both tokens must be topic words: "open sir" / "end add" drop.
+        if first == second or len(_content_tokens([first, second])) < 2:
+            continue
         counts["%s %s" % (first, second)] += 1.5
     return [term for term, _ in counts.most_common(top_n)]
-
-
-def _rank_candidates(candidates, keywords):
-    """Order title candidates best-first: keyword-frontloaded, then short.
-
-    Pure ranking over spoken-line trims — no words are added or invented.
-    """
-    keys = [(k or "").lower() for k in (keywords or []) if k]
-
-    def rank(text):
-        lowered = (text or "").lower()
-        front = 0 if any(lowered.startswith(k) or k in lowered[:40]
-                         for k in keys) else 1
-        return (front, len(text or ""))
-
-    seen = set()
-    unique = []
-    for cand in candidates or []:
-        key = (cand or "").lower()
-        if not cand or key in seen:
-            continue
-        seen.add(key)
-        unique.append(cand)
-    return sorted(unique, key=rank)
 
 
 def _measured_report(words, duration, context, transcript_source, segments=None):
@@ -438,17 +433,194 @@ def _trim_title(text, limit=100):
     return seo_mod.trim_title(text, limit=limit)
 
 
+_SPOKEN_WORD = re.compile(r"[a-z0-9]+")
+
+
+def _is_searchable_query(text):
+    """True when every non-stopword is a real topic word (no 'open sir')."""
+    tokens = _SPOKEN_WORD.findall((text or "").lower())
+    topical = [t for t in tokens if t not in trending_mod.STOPWORDS]
+    content = _content_tokens(tokens)
+    return len(content) >= 1 and content == topical
+
+
+def _grounded_queries(words, candidates, fallback):
+    """Search queries the transcript can honestly win.
+
+    External candidates (autocomplete) only survive when EVERY content
+    word was spoken (the no-agent package has no judgement to add a word
+    like "contribution"); the transcript's own phrases fill the rest.
+    Filler bigrams ("open sir") are dropped even if they were spoken.
+    """
+    # Raw words, not tokenize(): it drops short words like "ai", which
+    # would let an unspoken "ai" slip through unchecked.
+    spoken = set(_SPOKEN_WORD.findall(
+        " ".join((w.get("word") or "") for w in words or []).lower()))
+    kept = []
+    for q in seo_mod.clean_search_queries(candidates, limit=20):
+        content = [w for w in _SPOKEN_WORD.findall(q)
+                   if w not in trending_mod.STOPWORDS]
+        if (content and all(w in spoken for w in content)
+                and _is_searchable_query(q)):
+            kept.append(q)
+    rest = [q for q in (fallback or []) if _is_searchable_query(q)]
+    return seo_mod.clean_search_queries(kept + rest)
+
+
+def _demand_queries(queries, signals):
+    """Searches that exist outside this transcript.
+
+    Phrases composed from spoken words stay on the package so the user
+    can see them, but they are not demand: scoring a title against the
+    words it was built from always looks like a win. Autocomplete and
+    caller-supplied search queries count once they were grounded.
+    """
+    external = set(seo_mod.clean_search_queries(
+        list((signals or {}).get("search_queries") or []), limit=20))
+    return [q for q in (queries or []) if q in external]
+
+
+def _spoken_terms(words, terms):
+    """Trend / signal phrases whose content words were actually spoken."""
+    spoken = set(_SPOKEN_WORD.findall(
+        " ".join((w.get("word") or "") for w in words or []).lower()))
+    out = []
+    for raw in terms or []:
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        text = " ".join(raw.split())
+        content = [w for w in _SPOKEN_WORD.findall(text.lower())
+                   if w not in trending_mod.STOPWORDS]
+        if content and all(w in spoken for w in content) and text not in out:
+            out.append(text)
+    return out
+
+
+MIN_TITLE_WORDS = 3
+_FRAGMENT_START = frozenset(
+    "is are was were okay ok and but so well yeah oh um uh".split()
+)
+
+
+def _as_title(text, limit=seo_mod.TITLE_MAX_CHARS):
+    """Collapse space, strip dangling punctuation, fit the post limit."""
+    cleaned = re.sub(r"\s+", " ", (text or "").strip())
+    keep_q = cleaned.endswith("?")
+    cleaned = cleaned.strip(" \t.,;:!-")
+    if keep_q and cleaned:
+        cleaned = cleaned.rstrip("?") + "?"
+    if not cleaned:
+        return ""
+    return _trim_title(cleaned, limit=limit)
+
+
+def _title_case_words(text):
+    """Light title case: first word and content words capitalized."""
+    out = []
+    for i, raw in enumerate((text or "").split()):
+        low = raw.lower()
+        if i > 0 and low in seo_mod.TITLE_FILLER:
+            out.append(low)
+        else:
+            out.append(low[:1].upper() + low[1:])
+    return " ".join(out)
+
+
+def _is_fragment(text):
+    """True for cut-off spoken lines (commas, 'is'/'okay' lead-ins)."""
+    t = (text or "").strip()
+    if not t or t.endswith((",", ";", ":")) or "," in t:
+        return True
+    first = _SPOKEN_WORD.findall(t.lower())
+    return bool(first) and first[0] in _FRAGMENT_START
+
+
+def _winner_target_len(winning_titles):
+    """Aim titles at this channel's winning length; default a full mobile line."""
+    lengths = [len(t.strip()) for t in (winning_titles or [])
+               if isinstance(t, str) and t.strip()]
+    if not lengths:
+        return 42
+    lengths.sort()
+    return max(28, min(seo_mod.TITLE_SWEET_SPOT, lengths[len(lengths) // 2]))
+
+
+def _title_rank(text, queries, target_len=42):
+    """Best-first key: complete, wins a query, fits the feed, near target length."""
+    lint = seo_mod.lint_title(text)
+    return (
+        1 if _is_fragment(text) else 0,
+        0 if seo_mod.query_hit(text, queries) else 1,
+        0 if lint["mobile_fit"] else 1 if lint["desktop_fit"] else 2,
+        0 if lint["front_loaded"] else 1,
+        0 if lint["concrete"] else 1,
+        abs(len(text) - target_len),
+    )
+
+
+def _compose_titles(queries, phrases, terms, take_texts, target_len=42):
+    """Complete titles from spoken topic words — never a pasted take."""
+    seen = set()
+    candidates = []
+
+    def add(raw, from_speech=False):
+        if from_speech:
+            line = _as_title(raw)
+            if line and not line.endswith("?"):
+                line = line[:1].upper() + line[1:]
+        else:
+            line = _as_title(_title_case_words(raw))
+        if not line or _is_fragment(line) or len(line.split()) < 2:
+            return
+        key = line.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(line)
+
+    for q in queries:
+        add(q)
+    for p in phrases:
+        add(p)
+    for take in take_texts:
+        add(take, from_speech=True)
+    if not candidates:
+        fallback = _as_title(_title_case_words(" ".join(terms[:2])))
+        if fallback:
+            candidates.append(fallback)
+    return sorted(candidates, key=lambda c: _title_rank(c, queries, target_len))
+
+
+def _topic_query(title, queries, distinct):
+    """Search phrase this package should win, matching the chosen title."""
+    have = set(_SPOKEN_WORD.findall((title or "").lower()))
+
+    def covers(query):
+        content = _content_tokens(_SPOKEN_WORD.findall(query))
+        return len(content) >= 2 and all(w in have for w in content)
+
+    covering = [q for q in queries if covers(q)]
+    covering.sort(key=lambda q: -len(q))
+    if covering:
+        return covering[0]
+    for q in queries:
+        if len((q or "").split()) >= 2:
+            return q
+    if queries:
+        return queries[0]
+    return " ".join(distinct[:2])
+
+
 def generate_statistical_seo(input_video, words, duration, channel_context,
-                             transcript_source):
+                             transcript_source, signals=None):
     """Content-grounded SEO fallback: real transcript stats, no agent.
 
-    Used when the selected editing model is the automatic cut (no agent CLI
-    invoked). Every word of the title, alternatives, and tags comes from
-    actually-spoken transcript text — never templated around coincidental
-    terms, never generic evergreen filler. Raises SeoError when the
-    transcript is too thin to ground a package (callers turn that into a
-    refusal, not a template).
+    Used when no agent CLI is available. Titles are composed from spoken
+    topic words and search queries as complete lines — never pasted
+    transcript fragments. Raises SeoError when the transcript is too thin
+    to ground a package (callers turn that into a refusal, not a template).
     """
+    signals = signals or {}
     takes = pack_mod.pack_words(words)
     report = _measured_report(words, duration, channel_context,
                               transcript_source)
@@ -463,54 +635,88 @@ def generate_statistical_seo(input_video, words, duration, channel_context,
             f"and pick an editing agent for AI-written titles"
         )
     topic = " ".join(t[:1].upper() + t[1:] for t in distinct[:2])
-
-    highlights = report["content_highlights"]
-    take_texts = [t["text"] for t in takes if t.get("text")]
-    raw_candidates = []
-    for cand in [hook] + take_texts[1:4] + ([take_texts[-1]] if take_texts else []):
-        trimmed = _trim_title(cand)
-        if trimmed and trimmed not in raw_candidates:
-            raw_candidates.append(trimmed)
-        if len(raw_candidates) >= 4:
-            break
-    if len(raw_candidates) < 4:
-        topic_lead = _trim_title(f"{topic}: {hook}")
-        if topic_lead not in raw_candidates:
-            raw_candidates.append(topic_lead)
-    # The hook stays the title (most authentic line); the bench behind it
-    # ranks best-first so the strongest keyword-frontloaded spare is one tap
-    # away. Ranking never adds words, so grounding is preserved.
-    title = raw_candidates[0]
-    alternatives = [c for c in _rank_candidates(raw_candidates[1:], distinct)
-                    if c != title]
-
-    topic_tag = topic.lower()
-    tags = _fit_tag_budget(
-        list(dict.fromkeys(
-            list(distinct) + _top_phrases(words)
-            + [topic_tag, f"{topic_tag} tutorial",
-               f"{topic_tag} shorts"])))
-    hashtags = seo_mod.normalize_hashtags(tags, limit=MAX_SEO_HASHTAGS)
-    covered = "; ".join(highlights[:3]) if highlights else topic
-    description = format_upload_description(
-        hook,
-        f"About {topic}. Covered: {covered}.",
-        highlights,
-        tags,
-        hashtags,
+    phrases = _top_phrases(words)
+    trend_hits = _spoken_terms(words, signals.get("trend_terms"))
+    queries = _grounded_queries(
+        words,
+        list(signals.get("search_queries") or []) + trend_hits,
+        phrases + distinct[:3] + trend_hits,
     )
+    target_len = _winner_target_len(signals.get("winning_titles"))
+
+    def substantial(text):
+        return len((text or "").split()) >= MIN_TITLE_WORDS
+
+    highlights = [h for h in report["content_highlights"] if substantial(h)]
+    take_texts = [t["text"] for t in takes
+                  if t.get("text") and substantial(t["text"])]
+    ordered = _compose_titles(
+        queries, phrases, distinct, take_texts, target_len)
+    if not ordered:
+        raise SeoError("transcript too thin for SEO (no complete title)")
+    title = ordered[0]
+    alternatives = [t for t in ordered[1:5] if t.lower() != title.lower()]
+
+    tags = _fit_tag_budget(list(dict.fromkeys(
+        queries + trend_hits + phrases + list(distinct))))
+    hashtags = seo_mod.normalize_hashtags(tags, limit=MAX_SEO_HASHTAGS)
+
+    clean_highlights = []
+    for raw in highlights + take_texts:
+        line = _as_title(raw)
+        if (not line or _is_fragment(line) or len(line.split()) < 3
+                or line.lower() == title.lower()):
+            continue
+        line = line[:1].upper() + line[1:]
+        if line not in clean_highlights:
+            clean_highlights.append(line)
+        if len(clean_highlights) >= 4:
+            break
+
+    seed = _topic_query(title, queries, distinct)
+    lead = _title_case_words(seed) if seed else topic
+    if clean_highlights:
+        pay = clean_highlights[0]
+        pay_rest = pay[:1].lower() + pay[1:]
+        overview = f"{lead}: {pay_rest}."
+        bullets = clean_highlights[1:4]
+    else:
+        overview = f"{lead}."
+        bullets = []
+    description = format_upload_description(
+        title,
+        overview,
+        bullets,
+        hashtags,
+        cta=f"Follow for more on {lead}.",
+    )
+    pinned = ""
+    for line in take_texts:
+        if (line or "").strip().endswith("?"):
+            pinned = _as_title(line)[:200]
+            break
+    if not pinned and seed:
+        pinned = f"What's your take on {seed}?"
+    # Spoken phrases are not searches someone typed. Only external
+    # queries (and not the transcript's own terms) may raise the score.
+    demand = _demand_queries(queries, signals)
     quality = seo_mod.score_seo(title, description, tags, hashtags,
-                                distinct[:6],
-                                retention=report["retention_score"])
+                                distinct[:6] if demand else [],
+                                retention=report["retention_score"],
+                                hook=hook, queries=demand)
     return {
         "title": title,
         "title_alternatives": alternatives,
         "description": description,
         "tags": tags,
         "hashtags": hashtags,
+        "search_queries": queries,
+        "demand_queries": demand,
+        "pinned_comment": pinned,
         "seo_score": report["retention_score"],
         "quality_score": quality["quality_score"],
         "quality_checks": quality["checks"],
+        "hook_score": quality["hook"],
         "keywords_analyzed": distinct[:6],
         "review_report": report,
     }
@@ -530,19 +736,29 @@ def assemble_agent_seo(agent_seo, words, duration, channel_context,
     hashtags = seo_mod.normalize_hashtags(
         tags, _clean_str_list(agent_seo.get("hashtags"), MAX_SEO_HASHTAGS),
         limit=MAX_SEO_HASHTAGS)
-    quality = seo_mod.score_seo(agent_seo["title"], agent_seo["description"],
+    queries = seo_mod.clean_search_queries(agent_seo.get("search_queries"))
+    description = _finish_description(agent_seo["description"], hashtags)
+    quality = seo_mod.score_seo(agent_seo["title"], description,
                                 tags, hashtags, tags[:6],
-                                retention=stats["retention_score"])
+                                retention=stats["retention_score"],
+                                hook=agent_seo["hook_detected"],
+                                queries=queries)
     return {
         "title": agent_seo["title"],
         "title_alternatives": agent_seo["title_alternatives"],
-        "description": agent_seo["description"],
+        "description": description,
         "tags": tags,
         "hashtags": hashtags,
+        "search_queries": queries,
+        "pinned_comment": agent_seo.get("pinned_comment") or "",
         "seo_score": stats["retention_score"],
         "quality_score": quality["quality_score"],
         "quality_checks": quality["checks"],
-        "keywords_analyzed": tags[:6],
+        "hook_score": quality["hook"],
+        "keywords_analyzed": queries or tags[:6],
+        # Named agent queries are real targets. An empty list would tell
+        # the checklist to ignore the tag stand-in the scorer still uses.
+        **({"demand_queries": queries} if queries else {}),
         "review_report": {
             "overall_summary": agent_seo["overall_summary"],
             "hook_detected": agent_seo["hook_detected"],
@@ -560,13 +776,48 @@ def assemble_agent_seo(agent_seo, words, duration, channel_context,
     }
 
 
+def split_signal_arg(value, limit=MAX_PROMPT_SIGNALS):
+    """``a|b|c`` CLI list -> cleaned, deduped list (blank-safe)."""
+    out = []
+    for part in (value or "").split("|"):
+        text = " ".join(part.split())[:120]
+        if text and text not in out:
+            out.append(text)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def search_signals(words, trend_terms=None, winning_titles=None):
+    """Market signals for the SEO prompt, seeded from the transcript.
+
+    Autocomplete runs on the transcript's top phrase and top term (free,
+    fail-soft, a few seconds at most), so the agent sees the searches real
+    people type about what was actually said.
+    """
+    seeds = list(dict.fromkeys(_top_phrases(words, top_n=1)
+                               + _top_terms(words, top_n=1)))
+    queries = []
+    for seed in seeds[:2]:
+        for q in trending_mod.fetch_suggestions(seed):
+            if q not in queries:
+                queries.append(q)
+    return {
+        "search_queries": queries[:MAX_PROMPT_SIGNALS],
+        "trend_terms": list(trend_terms or [])[:MAX_PROMPT_SIGNALS],
+        "winning_titles": list(winning_titles or [])[:MAX_PROMPT_SIGNALS],
+    }
+
+
 def emit_seo_only(input_video, channel_context=None, agent_id=None,
                   elevenlabs_key=None, engine="auto", local_model=None,
-                  model=None):
+                  model=None, trend_terms=None, winning_titles=None):
     """Transcript-grounded SEO review of the source video.
 
     Transcribes the input, then either asks the selected agent CLI for the
     upload package or builds the statistical fallback from the real words.
+    Real search queries (autocomplete), niche trend terms and the
+    channel's own best titles steer the package when available.
     Returns 0 and emits the SEO JSON between the SEO markers on success;
     returns 1 with the reason on stderr when nothing can be grounded
     (missing file, no transcript, agent failure) — never a template.
@@ -615,11 +866,12 @@ def emit_seo_only(input_video, channel_context=None, agent_id=None,
         takes_text = pack_mod.render_markdown(
             pack_mod.pack_words(words), os.path.basename(input_video))
         payload = None
+        signals = search_signals(words, trend_terms, winning_titles)
         if wants_agent_cut(agent_id):
             try:
                 agent_seo = run_agent_seo(
                     agent_id, takes_text, duration, len(words),
-                    context=channel_context, model=model,
+                    context=channel_context, model=model, signals=signals,
                 )
             except agent_mod.AgentError as exc:
                 # Same graceful-degradation rule as stream clips: a dead
@@ -637,7 +889,7 @@ def emit_seo_only(input_video, channel_context=None, agent_id=None,
             try:
                 payload = generate_statistical_seo(
                     input_video, words, duration, channel_context,
-                    transcript_source)
+                    transcript_source, signals=signals)
             except SeoError as exc:
                 print(f"short_pipeline.py: SEO review skipped ({exc})",
                       file=sys.stderr)
@@ -668,6 +920,11 @@ def build_parser():
                         help="AI agent id for cut selection; auto|none|off = automatic cut.")
     parser.add_argument("--model", default=None, help="Optional model override for the agent CLI.")
     parser.add_argument("--edl", default=None, help="Explicit edl.json for multi-segment assembly.")
+    parser.add_argument("--edit-plan", default=None, help="Approved transcript edit JSON; preserves exact selected ranges.")
+    parser.add_argument("--edit-strategy", choices=("cleanup", "highlights", "full"), default=None,
+                        help="Studio automation: clean recording, AI highlights, or full recording.")
+    parser.add_argument("--keep-silence", action="store_true")
+    parser.add_argument("--keep-retakes", action="store_true")
     parser.add_argument("--cut-start", type=float, default=None, help="Manual trim start (seconds).")
     parser.add_argument("--cut-end", type=float, default=None, help="Manual trim end (seconds).")
     parser.add_argument("--subtitles", default=None, help="Subtitle style id, or 'none'.")
@@ -694,11 +951,41 @@ def build_parser():
     parser.add_argument("--aspect-ratio", default="9:16",
                         help="9:16|1:1|16:9 output canvas.")
     parser.add_argument("--generate-seo-only", action="store_true")
+    parser.add_argument("--trend-terms", default=None,
+                        help="SEO mode: pipe-separated niche trend terms.")
+    parser.add_argument("--winning-titles", default=None,
+                        help="SEO mode: pipe-separated best past titles.")
     return parser
 
 
 def wants_subtitles(subtitle_style):
     return bool(subtitle_style) and subtitle_style.strip().lower() != "none"
+
+
+def render_export(renderer, input_path, output_path, *args, **kwargs):
+    """Publish only a validated encode; failed retries keep the prior video."""
+    directory = os.path.dirname(os.path.abspath(output_path))
+    fd, staged = tempfile.mkstemp(prefix=".pixel_render_", suffix=".mp4", dir=directory)
+    os.close(fd)
+    report = os.path.splitext(staged)[0] + ".framing.json"
+    def log(line):
+        if not line.startswith("[COMPLETE]"):
+            print(line, flush=True)
+    try:
+        renderer(input_path, staged, *args, log=log, **kwargs)
+        if not os.path.getsize(staged):
+            raise render_mod.RenderError("Renderer produced an empty video")
+        if os.path.isfile(report):
+            os.replace(report, os.path.splitext(output_path)[0] + ".framing.json")
+        os.replace(staged, output_path)
+        print(f"[COMPLETE] {kwargs.get('aspect_ratio') or '9:16'} Short rendered: {output_path}", flush=True)
+        return output_path
+    except OSError as exc:
+        raise render_mod.RenderError(f"Could not save edited video: {exc}") from exc
+    finally:
+        for path in (staged, report):
+            if os.path.isfile(path):
+                os.remove(path)
 
 
 def wants_agent_cut(agent_id):
@@ -735,8 +1022,14 @@ def run_render(args):
     ):
         print("short_pipeline.py: output must differ from the source video", file=sys.stderr)
         return 1
+    if args.edit_strategy and (args.edit_plan or args.edl or args.cut_start is not None or args.cut_end is not None):
+        print("short_pipeline.py: automation cannot be combined with manual edits", file=sys.stderr)
+        return 1
     custom_prompt = bool(args.prompt and args.prompt.strip())
-    if custom_prompt and (not wants_agent_cut(args.agent) or args.edl
+    if args.edit_plan and (args.edl or args.cut_start is not None or args.cut_end is not None):
+        print("short_pipeline.py: transcript edits cannot be combined with an EDL or time trim", file=sys.stderr)
+        return 1
+    if custom_prompt and (not wants_agent_cut(args.agent) or args.edl or args.edit_plan
                           or args.cut_start is not None or args.cut_end is not None):
         print("short_pipeline.py: custom prompts require an editing agent and cannot "
               "be combined with an explicit EDL or manual trim.", file=sys.stderr)
@@ -755,6 +1048,14 @@ def run_render(args):
         print(f"short_pipeline.py: {exc}", file=sys.stderr)
         return 1
     source_duration = probe["duration"] or 0.0
+    edit_plan = None
+    if args.edit_plan:
+        try:
+            with open(args.edit_plan, encoding="utf-8") as handle:
+                edit_plan = edit_mod.validate_plan(json.load(handle), source_duration, args.input)
+        except (OSError, ValueError, TypeError) as exc:
+            print(f"short_pipeline.py: invalid transcript edit: {exc}", file=sys.stderr)
+            return 1
 
     # Transcript + takes (needed for subtitles AND agent cut selection).
     # Each output owns its evidence. Concurrent jobs in the same directory
@@ -774,7 +1075,25 @@ def run_render(args):
         ]
         if args.local_model:
             targs += ["--local-model", args.local_model]
-        rc = transcribe_isolated(targs)
+        if edit_plan is not None and edit_plan["words"] is not None:
+            with open(words_json, "w", encoding="utf-8") as fh:
+                json.dump({"source": os.path.basename(args.input), "model": "transcript-edit",
+                           "words": edit_plan["words"]}, fh, ensure_ascii=False)
+            rc = 0
+        elif args.edit_strategy and (not probe["has_audio"] or not auto_mod.needs_transcript(
+                args.edit_strategy, captions=wants_subtitles(args.subtitles),
+                remove_silence=not args.keep_silence, remove_retakes=not args.keep_retakes,
+                prompt=args.prompt)):
+            # Styling a full recording does not require a speech provider.
+            # Replace any old transcript so a re-export cannot reuse stale words.
+            with open(words_json, "w", encoding="utf-8") as fh:
+                json.dump({"source": os.path.basename(args.input), "words": []}, fh)
+            rc = 0
+        else:
+            rc = transcribe_isolated(targs)
+        if rc and args.engine in ("local", "elevenlabs"):
+            print(f"short_pipeline.py: selected {args.engine} transcription failed; no export was created. Check the provider error above and Settings → Engine.", file=sys.stderr)
+            return 1
         if rc == 0 and os.path.isfile(words_json):
             with open(words_json, "r", encoding="utf-8") as fh:
                 words = (json.load(fh).get("words") or [])
@@ -788,7 +1107,33 @@ def run_render(args):
         # ---- Cut selection: explicit EDL > manual trim > agent EDL > head-cut.
         segments = None
         cut_note = ""
-        if args.edl:
+        if args.edit_strategy:
+            try:
+                with open(packed_path, encoding="utf-8") as fh:
+                    automation = auto_mod.select_edit(args.edit_strategy, words, source_duration,
+                        has_audio=probe["has_audio"], captions=wants_subtitles(args.subtitles),
+                        remove_silence=not args.keep_silence, remove_retakes=not args.keep_retakes,
+                        agent=args.agent, target=args.duration, takes_text=fh.read(),
+                        context=args.channel_context, model=args.model, prompt=args.prompt)
+            except (edit_mod.EditError, agent_mod.AgentError) as exc:
+                print(f"short_pipeline.py: edit failed: {exc}", file=sys.stderr)
+                return 1
+            segments = automation["segments"]
+            automation.update({"engine": os.path.realpath(__file__), "source_path": os.path.realpath(args.input),
+                               "source_duration": source_duration, "word_count": len(words)})
+            for suffix in (".edl.json", ".edit.json"):
+                with open(args.output + suffix, "w", encoding="utf-8") as fh:
+                    json.dump(automation, fh, indent=2)
+            selected_seconds = render_mod.edl_output_seconds(segments, probe["has_audio"])
+            cut_note = (f"video-use {args.edit_strategy}: {selected_seconds:.2f}s from {source_duration:.2f}s; "
+                        f"{len(segments)} ranges; {len(automation['removals'])} repeated takes removed")
+        elif edit_plan is not None:
+            segments = edit_plan["segments"]
+            with open(args.output + ".edl.json", "w", encoding="utf-8") as fh:
+                json.dump({"source": edit_plan["source"], "segments": segments}, fh, indent=2)
+            selected_seconds = render_mod.edl_output_seconds(segments, probe["has_audio"])
+            cut_note = f"Your edit: {selected_seconds:.2f}s kept from {source_duration:.2f}s; {len(segments)} ranges"
+        elif args.edl:
             if not os.path.isfile(args.edl):
                 print(f"short_pipeline.py: EDL file not found: {args.edl}", file=sys.stderr)
                 return 1
@@ -863,7 +1208,7 @@ def run_render(args):
             print("[STAGE 3/4] Trimming dead pauses & baking 30ms anti-pop crossfades")
             case = (args.subtitle_case or "uppercase").strip().lower()
             try:
-                render_mod.render_edl(
+                render_export(render_mod.render_edl,
                     args.input, args.output, segments,
                     preset_id=args.preset or "vertical_clean",
                     words=words if wants_subtitles(args.subtitles) else None,
@@ -879,7 +1224,7 @@ def run_render(args):
             except render_mod.RenderError as exc:
                 print(f"short_pipeline.py: {exc}", file=sys.stderr)
                 return 1
-            if custom_prompt:
+            if custom_prompt and not args.edit_strategy:
                 with open(args.output + ".edit.json", "w", encoding="utf-8") as fh:
                     json.dump({"edit_request": edl["edit_request"],
                                "segments": segments, "source": edl["source"]}, fh, indent=2)
@@ -907,7 +1252,7 @@ def run_render(args):
         elif wants_subtitles(args.subtitles):
             print("[STAGE 2/4] No transcript words; rendering clean video", file=sys.stderr)
         try:
-            render_mod.render_short(
+            render_export(render_mod.render_short,
                 args.input, args.output,
                 preset_id=args.preset or "vertical_clean",
                 cut_duration=fallback_duration,
@@ -942,6 +1287,8 @@ def main(argv=None):
             args.input, args.channel_context, args.agent,
             elevenlabs_key=args.elevenlabs_key, engine=args.engine,
             local_model=args.local_model, model=args.model,
+            trend_terms=split_signal_arg(args.trend_terms),
+            winning_titles=split_signal_arg(args.winning_titles),
         )
 
     if not os.path.isfile(args.input):

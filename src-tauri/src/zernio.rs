@@ -188,6 +188,17 @@ fn caption_limit(platform: &str) -> usize {
     }
 }
 
+/// Hashtags per caption (mirrors src/lib/seo.ts PLATFORM_LIMITS). A few
+/// specific tags beat a wall of them everywhere; X and LinkedIn read a
+/// long hashtag tail as spam.
+fn hashtag_limit(platform: &str) -> usize {
+    match platform {
+        "twitter" => 2,
+        "linkedin" | "facebook" => 3,
+        _ => 5,
+    }
+}
+
 fn clip_chars(text: &str, max_chars: usize) -> String {
     text.trim()
         .chars()
@@ -211,7 +222,8 @@ fn hashtag_token(raw: &str) -> Option<String> {
     }
 }
 
-/// Title, description, then hashtags that still fit `max_chars`.
+/// Title, description, then hashtags that still fit `max_chars`, until the
+/// caption carries `max_hashtags` hashtags in total.
 /// A caption that does not fit falls back to the title when the title itself
 /// fits, so a long YouTube description does not blow X's 280-character cap.
 fn compose_caption(
@@ -219,6 +231,7 @@ fn compose_caption(
     description: &str,
     tags: Option<&Vec<String>>,
     max_chars: usize,
+    max_hashtags: usize,
 ) -> String {
     let title = title.trim();
     let description = description.trim();
@@ -239,7 +252,14 @@ fn compose_caption(
 
     let mut seen = std::collections::HashSet::new();
     let lower_body = body.to_lowercase();
+    let mut hashtag_count = body
+        .split_whitespace()
+        .filter(|w| w.starts_with('#') && w.len() > 1)
+        .count();
     for raw in tags.map(|t| t.as_slice()).unwrap_or(&[]) {
+        if hashtag_count >= max_hashtags {
+            break;
+        }
         let Some(tag) = hashtag_token(raw) else {
             continue;
         };
@@ -264,6 +284,7 @@ fn compose_caption(
             break;
         }
         body.push_str(&addition);
+        hashtag_count += 1;
     }
     body
 }
@@ -394,7 +415,15 @@ pub fn apply_tiktok_settings(body: &mut Value, settings: &TikTokPostSettings) {
     }
 }
 
-/// Per-platform target. YouTube gets title/visibility/madeForKids only.
+/// YouTube-only extras carried into `platformSpecificData`.
+#[derive(Default)]
+struct YoutubeExtras<'a> {
+    first_comment: Option<&'a str>,
+    category_id: Option<&'a str>,
+}
+
+/// Per-platform target. YouTube gets title/visibility/madeForKids plus the
+/// optional pinned `firstComment` and `categoryId`.
 /// Other schemas reject unknown keys, so they get no `platformSpecificData`.
 /// `customContent` is set only when this platform's caption differs from the
 /// shared post `content` (shorter X / Instagram / TikTok / LinkedIn copies).
@@ -404,6 +433,7 @@ fn platform_entry(
     caption: &str,
     root_content: &str,
     title: &str,
+    youtube: &YoutubeExtras,
 ) -> Value {
     let mut entry = json!({ "platform": platform });
     if let Some(acc_id) = account_id.map(str::trim).filter(|id| !id.is_empty()) {
@@ -415,11 +445,26 @@ fn platform_entry(
     if platform == "youtube" {
         let clipped = clip_chars(title, 100);
         if !clipped.is_empty() {
-            entry["platformSpecificData"] = json!({
+            let mut data = json!({
                 "title": clipped,
                 "visibility": "public",
                 "madeForKids": false,
             });
+            if let Some(comment) = youtube
+                .first_comment
+                .map(str::trim)
+                .filter(|c| !c.is_empty())
+            {
+                data["firstComment"] = json!(clip_chars(comment, 10_000));
+            }
+            if let Some(category) = youtube
+                .category_id
+                .map(str::trim)
+                .filter(|c| !c.is_empty() && c.chars().all(|ch| ch.is_ascii_digit()))
+            {
+                data["categoryId"] = json!(category);
+            }
+            entry["platformSpecificData"] = data;
         }
     }
     entry
@@ -446,11 +491,22 @@ pub fn build_post_body(
     media_url: &str,
     _now_utc: chrono::DateTime<chrono::Utc>,
 ) -> Value {
+    // Real hashtags win; tags-as-hashtags is the fallback for old payloads.
+    let caption_tags = payload
+        .hashtags
+        .as_ref()
+        .filter(|h| h.iter().any(|t| !t.trim().is_empty()))
+        .or(payload.tags.as_ref());
+    let youtube = YoutubeExtras {
+        first_comment: payload.first_comment.as_deref(),
+        category_id: payload.youtube_category.as_deref(),
+    };
     let root_content = compose_caption(
         &payload.title,
         &payload.description,
-        payload.tags.as_ref(),
+        caption_tags,
         5000,
+        hashtag_limit("youtube"),
     );
     let platform_objects: Vec<Value> = payload
         .platforms
@@ -466,10 +522,18 @@ pub fn build_post_body(
             let caption = compose_caption(
                 &payload.title,
                 &payload.description,
-                payload.tags.as_ref(),
+                caption_tags,
                 caption_limit(&platform),
+                hashtag_limit(&platform),
             );
-            platform_entry(&platform, acc_id, &caption, &root_content, &payload.title)
+            platform_entry(
+                &platform,
+                acc_id,
+                &caption,
+                &root_content,
+                &payload.title,
+                &youtube,
+            )
         })
         .collect();
 
@@ -609,6 +673,9 @@ mod tests {
             tags: Some(vec!["rust".to_string(), " shorts ".to_string()]),
             media_url: None,
             idempotency_key: None,
+            hashtags: None,
+            first_comment: None,
+            youtube_category: None,
         }
     }
 
@@ -705,6 +772,46 @@ mod tests {
         assert!(custom.chars().count() <= 270, "{}", custom);
         assert!(body["platforms"][1].get("customContent").is_none());
         assert!(body["content"].as_str().unwrap().chars().count() > 270);
+    }
+
+    #[test]
+    fn youtube_gets_pinned_comment_and_category_only_when_valid() {
+        let mut p = payload();
+        p.first_comment = Some("  Which crate do you use?  ".to_string());
+        p.youtube_category = Some("28".to_string());
+        let body = build_post_body(&p, "https://cdn/x.mp4", fixed_now());
+        let data = &body["platforms"][0]["platformSpecificData"];
+        assert_eq!(data["firstComment"], json!("Which crate do you use?"));
+        assert_eq!(data["categoryId"], json!("28"));
+
+        p.first_comment = Some("   ".to_string());
+        p.youtube_category = Some("tech".to_string());
+        let body = build_post_body(&p, "https://cdn/x.mp4", fixed_now());
+        let data = &body["platforms"][0]["platformSpecificData"];
+        assert!(data.get("firstComment").is_none());
+        assert!(data.get("categoryId").is_none());
+    }
+
+    #[test]
+    fn captions_cap_hashtags_per_platform_and_prefer_real_hashtags() {
+        let mut p = payload();
+        p.platforms = vec!["youtube".to_string(), "x".to_string()];
+        p.account_ids = Some(vec!["a1".to_string(), "a2".to_string()]);
+        p.description = "Short body.".to_string();
+        p.tags = Some(vec!["connection pooling".to_string()]);
+        p.hashtags = Some(
+            ["#rust", "#tokio", "#deadpool", "#async", "#pool", "#extra"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        );
+        let body = build_post_body(&p, "https://cdn/x.mp4", fixed_now());
+        let count = |text: &str| text.split_whitespace().filter(|w| w.starts_with('#')).count();
+        let root = body["content"].as_str().unwrap();
+        assert_eq!(count(root), 5, "{root}");
+        assert!(!root.contains("#connectionpooling"), "{root}");
+        let x = body["platforms"][1]["customContent"].as_str().unwrap();
+        assert_eq!(count(x), 2, "{x}");
     }
 
     #[test]

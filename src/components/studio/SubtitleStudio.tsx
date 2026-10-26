@@ -128,6 +128,8 @@ interface SubtitleStudioProps {
   burnInCaptions: boolean;
   onToggleBurnInCaptions: (val: boolean) => void;
   videoTitle?: string;
+  isActive?: boolean;
+  aspectRatio?: string;
 }
 
 export const SubtitleStudio: React.FC<SubtitleStudioProps> = ({
@@ -142,6 +144,8 @@ export const SubtitleStudio: React.FC<SubtitleStudioProps> = ({
   burnInCaptions,
   onToggleBurnInCaptions,
   videoTitle,
+  isActive = true,
+  aspectRatio = "9:16",
 }) => {
   const [activeCategory, setActiveCategory] = useState<string>("all");
   const [isPlaying, setIsPlaying] = useState<boolean>(true);
@@ -167,12 +171,12 @@ export const SubtitleStudio: React.FC<SubtitleStudioProps> = ({
 
   // Real-time animation ticker
   useEffect(() => {
-    if (!isPlaying || words.length === 0) return;
+    if (!isActive || !burnInCaptions || !isPlaying || words.length === 0) return;
     const interval = setInterval(() => {
       setActiveWordIndex((prev) => (prev + 1) % words.length);
     }, 450);
     return () => clearInterval(interval);
-  }, [isPlaying, words.length]);
+  }, [isActive, burnInCaptions, isPlaying, words.length]);
 
   // Filtered themes
   const filteredThemes = React.useMemo(() => {
@@ -189,6 +193,8 @@ export const SubtitleStudio: React.FC<SubtitleStudioProps> = ({
   // (The px fallback before each cqw class covers engines without
   // container-query units.) Positions mirror MarginV as % of height:
   // top 140 -> 7.3%, exact middle <-> Alignment 5, bottom 200 -> 10.4%.
+  // Spoken-word highlight is color-only (no scale, no opacity fade) so a
+  // selected caption stays the same size and fully visible, matching the burn.
   // Keep these fractions in sync when either side changes.
   const getSizeClasses = () => {
     if (selectedTheme === "punch") {
@@ -244,8 +250,8 @@ export const SubtitleStudio: React.FC<SubtitleStudioProps> = ({
       case "pop":
         return (
           <span
-            className={`inline-block font-black uppercase transition-transform duration-150 ${
-              isActive ? "scale-110 text-[#FFE500]" : "text-white"
+            className={`inline-block font-black uppercase ${
+              isActive ? "text-[#FFE500]" : "text-white"
             }`}
             style={
               isActive
@@ -265,7 +271,7 @@ export const SubtitleStudio: React.FC<SubtitleStudioProps> = ({
 
       case "spotlight":
         return isActive ? (
-          <span className="inline-block scale-105 rounded-full bg-[#7C3AED] px-2 py-0.5 font-bold text-white shadow-md shadow-purple-900/50 transition-all">
+          <span className="inline-block rounded-full bg-[#7C3AED] px-2 py-0.5 font-bold text-white shadow-md shadow-purple-900/50">
             {word}
           </span>
         ) : (
@@ -280,8 +286,8 @@ export const SubtitleStudio: React.FC<SubtitleStudioProps> = ({
       case "glow":
         return (
           <span
-            className={`inline-block font-extrabold uppercase tracking-wide transition-all ${
-              isActive ? "text-[#00F5FF]" : "text-white/60"
+            className={`inline-block font-extrabold uppercase tracking-wide ${
+              isActive ? "text-[#00F5FF]" : "text-white"
             }`}
             style={
               isActive
@@ -324,8 +330,8 @@ export const SubtitleStudio: React.FC<SubtitleStudioProps> = ({
       case "hype":
         return (
           <span
-            className={`inline-block -skew-x-6 font-black tracking-tight uppercase transition-all ${
-              isActive ? "scale-110 text-[#22C55E]" : "text-white"
+            className={`inline-block -skew-x-6 font-black tracking-tight uppercase ${
+              isActive ? "text-[#22C55E]" : "text-white"
             }`}
             style={
               isActive
@@ -343,7 +349,7 @@ export const SubtitleStudio: React.FC<SubtitleStudioProps> = ({
       case "punch":
         return (
           <span
-            className="inline-block scale-110 font-black tracking-wider text-white uppercase"
+            className="inline-block font-black tracking-wider text-white uppercase"
             style={{
               textShadow:
                 "2.5px 2.5px 0 #000, -1.5px -1.5px 0 #000, 1.5px -1.5px 0 #000, -1.5px 1.5px 0 #000",
@@ -388,14 +394,14 @@ export const SubtitleStudio: React.FC<SubtitleStudioProps> = ({
   ) => {
     if (themeId === "boxed") {
       return (
-        <div className="inline-flex flex-wrap items-center justify-center gap-1.5 rounded-xl border border-white/10 bg-black/85 px-3.5 py-1.5 shadow-2xl backdrop-blur-md">
+        <div className="inline-flex flex-wrap items-center justify-center gap-1.5 rounded-xl border border-white/10 bg-black px-3.5 py-1.5 shadow-2xl">
           {children}
         </div>
       );
     }
     if (themeId === "paper") {
       return (
-        <div className="inline-flex flex-wrap items-center justify-center gap-1.5 rounded-full border border-neutral-200 bg-white/95 px-3 py-1 shadow-xl">
+        <div className="inline-flex flex-wrap items-center justify-center gap-1.5 rounded-full border border-neutral-200 bg-white px-3 py-1 shadow-xl">
           {children}
         </div>
       );
@@ -434,7 +440,7 @@ export const SubtitleStudio: React.FC<SubtitleStudioProps> = ({
     return (
       <SectionCard
         title="Captions"
-        description="Off — the short renders as a clean 9:16 crop"
+        description="Export your video without on-screen captions"
         actions={captionSwitch}
       >
         <EmptyState
@@ -448,19 +454,18 @@ export const SubtitleStudio: React.FC<SubtitleStudioProps> = ({
   }
 
   return (
-    <div className="grid items-start gap-5 lg:grid-cols-[18rem_minmax(0,1fr)]">
+    <div className="studio-caption-layout grid items-start gap-5">
       {/* 9:16 monitor */}
-      <div className="mx-auto w-full max-w-[18rem] lg:sticky lg:top-0 lg:mx-0">
+      <div className="studio-caption-sample mx-auto w-full max-w-[14rem]">
         <div className="overflow-hidden rounded-3xl bg-surface shadow-surface">
-          <div className="flex h-12 items-center justify-between border-b border-separator px-4">
-            <span className="text-sm font-semibold text-foreground">
-              Preview
+          <div className="flex min-h-12 items-center border-b border-separator px-3 py-2">
+            <span className="text-xs font-semibold text-foreground">
+              Caption style sample
             </span>
-            <span className="tabular-nums text-xs text-muted">1080 × 1920</span>
           </div>
 
           {/* Viewport (container queries scale captions to any width) */}
-          <div className="@container relative flex aspect-[9/16] w-full flex-col justify-between overflow-hidden bg-neutral-950 select-none">
+          <div className="@container relative flex w-full flex-col justify-between overflow-hidden bg-neutral-950 select-none" style={{ aspectRatio: aspectRatio.replace(":", "/") }}>
             <div className="absolute inset-0 bg-neutral-950">
               <div className="absolute inset-0 bg-[radial-gradient(ellipse_80%_80%_at_50%_35%,rgba(255,255,255,0.05),transparent)]" />
               <div className="absolute inset-x-0 bottom-0 h-32 bg-gradient-to-t from-black/80 to-transparent" />
@@ -487,7 +492,7 @@ export const SubtitleStudio: React.FC<SubtitleStudioProps> = ({
             </div>
 
             <div
-              className={`pointer-events-none absolute inset-x-[3.7%] z-20 text-center transition-all duration-200 ${getPositionClasses()} ${getSizeClasses()}`}
+              className={`pointer-events-none absolute inset-x-[3.7%] z-20 text-center ${getPositionClasses()} ${getSizeClasses()}`}
             >
               {renderSubtitleContainer(
                 selectedTheme,
@@ -634,7 +639,7 @@ export const SubtitleStudio: React.FC<SubtitleStudioProps> = ({
           <div
             role="radiogroup"
             aria-label="Caption style"
-            className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 2xl:grid-cols-3"
+            className="studio-caption-options grid gap-3"
           >
             {filteredThemes.map((theme) => {
               const isSelected = selectedTheme === theme.id;

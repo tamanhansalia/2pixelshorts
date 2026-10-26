@@ -7,11 +7,14 @@ Stdlib unittest only — run from the video-use directory:
 
 import json
 import os
+import subprocess
 import sys
 import unittest
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "helpers"))
+# SEO autocomplete is a live network call; tests stay offline.
+os.environ["PIXEL_DISABLE_SUGGEST"] = "1"
 
 import agent_edit
 import grade
@@ -298,17 +301,28 @@ class EdlFilterTests(unittest.TestCase):
 
 class SeoContractTests(unittest.TestCase):
     def test_metadata_matches_typescript_shape(self):
-        seo = short_pipeline.generate_metadata(
-            "/tmp/rust_talk.mp4", channel_context="rust and tauri", agent_id="claude"
+        words = [
+            {"word": w, "start": i * 0.5, "end": i * 0.5 + 0.4}
+            for i, w in enumerate(
+                ("rust async pooling tokio deadpool ".split() * 6))
+        ]
+        seo = short_pipeline.generate_statistical_seo(
+            "/tmp/rust_talk.mp4", words, 30.0, "rust and tauri",
+            "faster-whisper:tiny.en",
         )
         for key in ("title", "title_alternatives", "description", "tags",
-                    "hashtags", "seo_score", "keywords_analyzed", "review_report"):
+                    "hashtags", "search_queries", "pinned_comment",
+                    "seo_score", "keywords_analyzed", "review_report"):
             self.assertIn(key, seo)
         for key in ("overall_summary", "hook_detected", "content_highlights",
                     "retention_score", "target_audience", "suggested_pacing",
                     "word_count"):
             self.assertIn(key, seo["review_report"])
-        self.assertEqual(len(seo["title_alternatives"]), 4)
+
+    def test_templated_generator_is_gone(self):
+        # The old filename-templated package (hardcoded seo_score 98) must
+        # never come back: every package is grounded in a transcript.
+        self.assertFalse(hasattr(short_pipeline, "generate_metadata"))
 
 
 class ReviewTests(unittest.TestCase):
@@ -389,6 +403,39 @@ class TrendingTests(unittest.TestCase):
             doc = trending.get_trending("rust", api_key="", cache_dir=cache_dir)
         self.assertEqual(doc["keywords"], [])
         self.assertIn("note", doc)
+
+    def test_velocity_weights_rising_videos(self):
+        videos = [
+            {"video_id": "a", "title": "tokio tricks", "description": "",
+             "published_at": "2026-01-01T00:00:00Z"},
+            {"video_id": "b", "title": "deadpool tricks", "description": "",
+             "published_at": "2026-01-01T00:00:00Z"},
+        ]
+        now = datetime(2026, 1, 1, 10, tzinfo=timezone.utc)
+        trending.apply_velocity(videos, {"a": 100000, "b": 10}, now=now)
+        self.assertEqual(videos[0]["views_per_hour"], 10000.0)
+        terms = {k["term"]: k["score"]
+                 for k in trending.extract_keywords(videos)}
+        self.assertGreater(terms["tokio"], terms["deadpool"])
+
+    def test_suggestions_parse_and_fail_soft(self):
+        original = trending._get_json
+        try:
+            os.environ["PIXEL_DISABLE_SUGGEST"] = "0"
+            trending._get_json = lambda url, timeout: [
+                "rust", ["Rust Tutorial", "rust  tutorial", "rust game"]]
+            self.assertEqual(trending.fetch_suggestions("rust"),
+                             ["rust tutorial", "rust game"])
+
+            def boom(url, timeout):
+                raise OSError("offline")
+            trending._get_json = boom
+            self.assertEqual(trending.fetch_suggestions("rust"), [])
+            os.environ["PIXEL_DISABLE_SUGGEST"] = "1"
+            self.assertEqual(trending.fetch_suggestions("rust"), [])
+        finally:
+            trending._get_json = original
+            os.environ["PIXEL_DISABLE_SUGGEST"] = "1"
 
     def test_cache_round_trip_and_stale(self):
         with tempfile.TemporaryDirectory() as cache_dir:
@@ -539,11 +586,11 @@ class SubtitleStyleTests(unittest.TestCase):
         # First word spoken: active tags on THIS, reset before NEW so the
         # highlight cannot leak onto the following word.
         self.assertTrue(
-            events[0].endswith(r"{\1c&H0000E5FF&\fscx112\fscy112}THIS{\r} NEW"),
+            events[0].endswith(r"{\1c&H0000E5FF&}THIS{\r} NEW"),
             events[0],
         )
         self.assertTrue(
-            events[1].endswith("THIS " + r"{\1c&H0000E5FF&\fscx112\fscy112}NEW{\r}"),
+            events[1].endswith("THIS " + r"{\1c&H0000E5FF&}NEW{\r}"),
             events[1],
         )
         self.assertIn("0:00:00.00,0:00:00.50", events[0])
@@ -607,6 +654,9 @@ class SubtitleStyleTests(unittest.TestCase):
         vf = args[args.index("-vf") + 1]
         self.assertIn("subtitles=c.ass", vf)
         self.assertNotIn("force_style", vf)
+        self.assertIn("format=gbrp", vf)
+        self.assertLess(vf.index("format=gbrp"), vf.index("subtitles="))
+        self.assertLess(vf.index("subtitles="), vf.index("format=yuv420p"))
 
     def test_head_cut_builder_legacy_srt_keeps_force_style(self):
         args = render.build_ffmpeg_args(
@@ -627,6 +677,78 @@ class SubtitleStyleTests(unittest.TestCase):
         )
         self.assertIn("subtitles=c.ass", filt)
         self.assertNotIn("force_style", filt)
+        self.assertIn("format=gbrp", filt)
+
+    def test_captions_stay_fully_opaque_without_size_jump(self):
+        # Spoken-word highlight is color-only: a selected caption must not
+        # fade in (inactive_alpha / &H80 shadow) or change size (\fscx).
+        for theme_id, theme in render._SUBTITLE_THEMES.items():
+            self.assertNotIn("inactive_alpha", theme, theme_id)
+            tags = theme.get("active_tags") or ""
+            self.assertNotIn(r"\fscx", tags, theme_id)
+            self.assertNotIn(r"\fscy", tags, theme_id)
+            style = render.subtitle_ass_style_line(theme_id, "bottom", "standard")
+            self.assertNotIn("&H80", style, theme_id)
+            self.assertNotIn("&H66", style, theme_id)
+            primary = style.split(",")[3]
+            self.assertTrue(primary.startswith("&H00"), theme_id)
+
+    def test_glow_inactive_words_are_opaque(self):
+        style = render.subtitle_force_style("glow", "bottom", "standard")
+        self.assertIn("PrimaryColour=&H00FFFFFF", style)
+        ass = render.subtitle_ass_style_line("glow", "bottom", "standard")
+        self.assertIn("&H00FFFFFF", ass)
+
+    def test_burned_captions_are_opaque_on_bright_backgrounds(self):
+        # Regression: libass over yuv420p washed white glyphs to ~50% gray,
+        # which looked like a transparent fade-in. RGB compositing must keep
+        # the fill near 255. Dark field so white/yellow fills are measurable.
+        with tempfile.TemporaryDirectory(prefix="caption_opaque_") as directory:
+            source = os.path.join(directory, "field.mp4")
+            output = os.path.join(directory, "burned.mp4")
+            ass_path = os.path.join(directory, "captions.ass")
+            subprocess.run([
+                "ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                "color=0x123456:s=1080x1920:d=1:r=25",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", source,
+            ], check=True)
+            with open(ass_path, "w", encoding="utf-8") as handle:
+                handle.write(render.words_to_ass(
+                    [
+                        {"word": "OPAQUE", "start": 0.0, "end": 1.0},
+                        {"word": "TEXT", "start": 0.0, "end": 1.0},
+                    ],
+                    case="uppercase", style_id="pop",
+                    position="bottom", size="standard",
+                ))
+            args = render.build_ffmpeg_args(
+                source, output, "vertical_clean", cut_duration=1.0,
+                srt_path=ass_path, subtitle_style="pop",
+                subtitle_position="bottom", subtitle_size="standard",
+                has_audio=False,
+            )
+            subprocess.run(["ffmpeg", "-v", "error", *args], check=True)
+            raw = subprocess.check_output([
+                "ffmpeg", "-v", "error", "-ss", "0.2", "-i", output,
+                "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
+            ])
+            width, height = 1080, 1920
+
+            def pixel(x, y):
+                index = (y * width + x) * 3
+                return raw[index], raw[index + 1], raw[index + 2]
+
+            # Caption sits above MarginV=200 with FontSize 50.
+            whitest = 0
+            black_outline = 0
+            for y in range(1600, 1850):
+                for x in range(100, 980):
+                    red, green, blue = pixel(x, y)
+                    whitest = max(whitest, min(red, green, blue))
+                    if red < 40 and green < 40 and blue < 40:
+                        black_outline += 1
+            self.assertGreater(whitest, 240, "caption fill must stay fully opaque")
+            self.assertGreater(black_outline, 20, "caption outline must stay solid black")
 
 
 class TranscribeEngineTests(unittest.TestCase):
@@ -673,13 +795,13 @@ class TranscribeEngineTests(unittest.TestCase):
             rc, _err = self._run_main(
                 ["--input", src, "--output", out, "--engine", "local"]
             )
-            self.assertEqual(rc, 0)
+            self.assertEqual(rc, 1)
             with open(out, encoding="utf-8") as fh:
                 doc = json.load(fh)
             self.assertEqual(doc["words"], [])
             self.assertIn("setup_local_stt", doc["note"])
 
-    def test_explicit_elevenlabs_without_key_stays_placeholder(self):
+    def test_explicit_elevenlabs_without_key_fails_with_diagnostic(self):
         with tempfile.TemporaryDirectory() as tmp:
             src = os.path.join(tmp, "in.mp4")
             out = os.path.join(tmp, "words.json")
@@ -687,7 +809,7 @@ class TranscribeEngineTests(unittest.TestCase):
             rc, err = self._run_main(
                 ["--input", src, "--output", out, "--engine", "elevenlabs"]
             )
-            self.assertEqual(rc, 0)
+            self.assertEqual(rc, 1)
             self.assertIn("no API key", err)
 
     def test_local_decode_pins_temperature_for_determinism(self):
@@ -710,8 +832,10 @@ class TranscribeEngineTests(unittest.TestCase):
         sys.modules["faster_whisper"] = fake_mod
 
         def fake_run(cmd, **kwargs):
-            with open(cmd[-1], "wb") as fh:
-                fh.write(b"wav")
+            import wave
+            with wave.open(cmd[-1], "wb") as fh:
+                fh.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+                fh.writeframes(b"\0\0" * 16000)
             return _types.SimpleNamespace(returncode=0, stderr="")
 
         transcribe.subprocess.run = fake_run
@@ -729,7 +853,10 @@ class TranscribeEngineTests(unittest.TestCase):
         self.assertEqual(calls["kwargs"].get("temperature"), 0.0)
         self.assertTrue(calls["offline"])
         self.assertTrue(calls["kwargs"].get("word_timestamps"))
-        self.assertEqual(doc["model"], "faster-whisper:tiny.en")
+        self.assertTrue(calls["kwargs"]["vad_filter"])
+        self.assertFalse(calls["kwargs"]["condition_on_previous_text"])
+        self.assertEqual(calls["kwargs"]["hallucination_silence_threshold"], 1.0)
+        self.assertEqual(doc["model"], f"faster-whisper:{transcribe.FASTER_WHISPER_DEFAULT_MODEL}")
 
     def test_missing_input_is_usage_error(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -759,6 +886,17 @@ class TranscribeEngineTests(unittest.TestCase):
             ],
         )
         self.assertEqual(transcribe.words_from_faster_segments([]), [])
+
+    def test_local_words_reject_hallucinated_zero_or_out_of_range_timestamps(self):
+        from types import SimpleNamespace as Item
+        segment = Item(words=[Item(word="spoken", start=1.0, end=1.5),
+                              Item(word="zero", start=2.0, end=2.0),
+                              Item(word="after", start=5.0, end=6.0),
+                              Item(word="invalid", start=float("nan"), end=3.0),
+                              Item(word="last", start=3.5, end=4.1)])
+        self.assertEqual(transcribe.words_from_faster_segments([segment], 4.0),
+                         [{"word": "spoken", "start": 1.0, "end": 1.5},
+                          {"word": "last", "start": 3.5, "end": 4.0}])
 
     def test_transcript_source_labels(self):
         self.assertEqual(review._transcript_source({"model": "scribe_v1"}), "scribe_v1")
@@ -944,16 +1082,24 @@ class StatisticalSeoTests(unittest.TestCase):
         # Language comes from actually-spoken terms.
         self.assertIn("rust", payload["tags"])
         self.assertTrue(report["hook_detected"])
+        # Spoken phrases are listed, but they are not search demand.
+        self.assertEqual(payload["demand_queries"], [])
+        got = {c["id"]: c["got"] for c in payload["quality_checks"]}
+        self.assertEqual(got["title_query_match"], 0)
+        self.assertEqual(got["description_above_fold"], 0)
         self.assertGreaterEqual(len(payload["title_alternatives"]), 1)
         self.assertLessEqual(len(payload["title_alternatives"]), 4)
-        # Every title is spoken lines only, within the post limit.
+        # Titles are composed from spoken topic words as complete lines.
         vocab = {w["word"].lower() for w in words}
         for title in [payload["title"]] + payload["title_alternatives"]:
             self.assertLessEqual(len(title), 100)
+            self.assertFalse(title.endswith((",", ";", ":")))
+            self.assertGreaterEqual(len(title.split()), 2, title)
             for token in title.lower().split():
                 token = token.strip(":.,!?\"'").rstrip("...")
                 if token:
                     self.assertIn(token, vocab, title)
+        self.assertTrue(payload["pinned_comment"])
         # No generic evergreen filler.
         for filler in ("tech", "coding", "developer", "viral",
                        "productivity", "trending"):
@@ -983,6 +1129,59 @@ class StatisticalSeoTests(unittest.TestCase):
                 "demo.mp4", words, 10.0, "", "none",
             )
 
+    def test_composed_title_is_a_complete_query_line(self):
+        spoken = (
+            "stop wasting hours on rust connection pooling. "
+            "tokio's default pool leaks under load and nobody tells you. "
+            "here is the deadpool setup I use in production."
+        ).split()
+        words = [
+            {"word": w, "start": i * 0.4, "end": i * 0.4 + 0.35}
+            for i, w in enumerate(spoken)
+        ]
+        payload = short_pipeline.generate_statistical_seo(
+            "demo.mp4", words, 28.0, "Rust channel",
+            "faster-whisper:tiny.en",
+            signals={"search_queries": ["rust connection pooling"],
+                     "trend_terms": ["deadpool", "unspokenviral"],
+                     "winning_titles": ["Tokio in 30 seconds"]},
+        )
+        title = payload["title"]
+        self.assertFalse(title.endswith((".", ",", ";")))
+        self.assertGreaterEqual(len(title.split()), 2)
+        self.assertTrue(seo.query_hit(title, ["rust connection pooling"]))
+        self.assertNotEqual(title.lower(), "stop wasting hours on rust connection pooling.")
+        self.assertIn("deadpool", [t.lower() for t in payload["tags"]])
+        self.assertNotIn("unspokenviral", [t.lower() for t in payload["tags"]])
+        self.assertTrue(payload["pinned_comment"])
+        self.assertTrue(payload["description"].startswith(title))
+        self.assertEqual(payload["demand_queries"], ["rust connection pooling"])
+        got = {c["id"]: c["got"] for c in payload["quality_checks"]}
+        self.assertEqual(got["title_query_match"], 12)
+
+    def test_filler_takes_are_not_the_title(self):
+        spoken = (
+            "I want to spawn a Muse Agent, is open, sir, and focused. "
+            "Okay, I want to open Codex Agent. is open and focused, sir. "
+            "Open Terminal. Terminal is open, sir, with Hulk."
+        ).split()
+        words = [
+            {"word": w, "start": i * 0.4, "end": i * 0.4 + 0.35}
+            for i, w in enumerate(spoken)
+        ]
+        payload = short_pipeline.generate_statistical_seo(
+            "demo.mp4", words, 20.0, "AI coding live",
+            "faster-whisper:tiny.en",
+        )
+        blob = " ".join(
+            [payload["title"]] + payload["title_alternatives"]
+            + payload["search_queries"]
+        ).lower()
+        self.assertNotIn("is open and focused, sir", blob)
+        self.assertNotIn("open sir", payload["search_queries"])
+        self.assertFalse(payload["title"].endswith(","))
+        self.assertGreaterEqual(len(payload["title"].split()), 2)
+
     def test_assembled_agent_package_keeps_measured_numbers(self):
         words = self._words()
         agent_doc = {
@@ -1006,6 +1205,7 @@ class StatisticalSeoTests(unittest.TestCase):
                          "scribe_v1")
         self.assertEqual(payload["seo_score"],
                          payload["review_report"]["retention_score"])
+        self.assertNotIn("demand_queries", payload)
 
 
 class SeoStructureTests(unittest.TestCase):
@@ -1040,15 +1240,15 @@ class SeoStructureTests(unittest.TestCase):
         # Alternatives vary with the takes available, best first.
         self.assertGreaterEqual(len(payload["title_alternatives"]), 1)
         self.assertLessEqual(len(payload["title_alternatives"]), 4)
-        # Structured, divided description carrying keywords + hashtags.
+        # Composed title above the fold, hashtags closing it, no stuffing.
         desc = payload["description"]
-        for section in ("Key Highlights:", "Search Keywords:",
-                        payload["review_report"]["hook_detected"]):
-            self.assertIn(section, desc)
-        for tag in payload["tags"]:
-            self.assertIn(tag, desc)
+        self.assertTrue(desc.startswith(payload["title"]))
+        self.assertNotIn("Search Keywords", desc)
         for ht in payload["hashtags"]:
             self.assertIn(ht, desc)
+        self.assertLessEqual(len(payload["hashtags"]), 5)
+        self.assertTrue(seo.query_hit(desc[:150], payload["search_queries"]
+                                      or payload["keywords_analyzed"]))
 
     def test_validate_caps_tags_and_completes_description(self):
         doc = {
@@ -1062,24 +1262,80 @@ class SeoStructureTests(unittest.TestCase):
             "overall_summary": "Summary.",
         }
         seo = short_pipeline.validate_seo(doc)
-        self.assertLessEqual(len(seo["tags"]), 20)
+        self.assertLessEqual(len(seo["tags"]), 15)
         self.assertLessEqual(len(", ".join(seo["tags"])), 500)
         # Most important first: order preserved from the head.
         self.assertEqual(seo["tags"][0], "keyword-phrase-number-00")
-        # Keyword + hashtag block appended exactly once.
-        self.assertIn("Search Keywords:", seo["description"])
-        self.assertIn("keyword-phrase-number-00", seo["description"])
-        self.assertEqual(seo["description"].count("Search Keywords:"), 1)
+        # Hashtags close the description; no keyword list is appended.
+        self.assertNotIn("Search Keywords", seo["description"])
+        self.assertIn(seo["hashtags"][0], seo["description"])
+        self.assertEqual(seo["description"].count(seo["hashtags"][0]), 1)
+        # Optional extras default cleanly when an older agent omits them.
+        self.assertEqual(seo["search_queries"], [])
+        self.assertEqual(seo["pinned_comment"], "")
 
-    def test_template_package_matches_new_structure(self):
-        seo = short_pipeline.generate_metadata(
-            "/tmp/rust_talk.mp4", channel_context="rust and tauri",
+    def test_validate_strips_agent_keyword_block_and_keeps_queries(self):
+        doc = {
+            "title": "Rust pooling in 60 seconds",
+            "title_alternatives": ["A"],
+            "description": ("Your pool is leaking.\nFix it in Rust.\n\n"
+                            "\U0001F50D Search Keywords:\nrust, pool, tokio\n\n"
+                            "#rust #tokio"),
+            "tags": ["rust", "tokio"],
+            "hashtags": ["#rust", "#tokio"],
+            "search_queries": ["Rust Connection Pooling", "rust connection pooling",
+                               "tokio pool", "deadpool", "extra"],
+            "pinned_comment": "  Which pool crate do you use?  ",
+            "hook_detected": "Your pool is leaking.",
+            "content_highlights": ["c1"],
+            "overall_summary": "Summary.",
+        }
+        seo = short_pipeline.validate_seo(doc)
+        self.assertNotIn("Search Keywords", seo["description"])
+        self.assertNotIn("rust, pool, tokio", seo["description"])
+        self.assertIn("#rust #tokio", seo["description"])
+        self.assertEqual(seo["search_queries"],
+                         ["rust connection pooling", "tokio pool", "deadpool"])
+        self.assertEqual(seo["pinned_comment"], "Which pool crate do you use?")
+
+    def test_fallback_queries_need_every_word_spoken(self):
+        words = [{"word": w, "start": i * 0.5, "end": i * 0.5 + 0.4}
+                 for i, w in enumerate("open source models run local".split())]
+        got = short_pipeline._grounded_queries(
+            words, ["open source ai", "open source contribution",
+                    "local models", "open source"], [])
+        # "ai" and "contribution" were never said; "models" was.
+        self.assertEqual(got, ["local models", "open source"])
+
+    def test_fallback_phrases_skip_filler(self):
+        words = [{"word": w, "start": i * 0.5, "end": i * 0.5 + 0.4}
+                 for i, w in enumerate(
+                     ("end end add subtitles local model " * 3).split())]
+        phrases = short_pipeline._top_phrases(words)
+        self.assertNotIn("end end", phrases)
+        self.assertNotIn("end add", phrases)
+        self.assertIn("local model", phrases)
+        self.assertNotIn("end", short_pipeline._top_terms(words))
+
+    def test_prompt_carries_market_signals(self):
+        prompt = short_pipeline.build_seo_prompt(
+            "takes", 30.0, 80, "ctx",
+            search_queries=["rust connection pooling"],
+            trend_terms=["deadpool"],
+            winning_titles=["Tokio in 30 seconds"],
         )
-        self.assertGreater(len(seo["tags"]), 12)
-        self.assertLessEqual(len(seo["tags"]), 20)
-        self.assertEqual(len(seo["title_alternatives"]), 4)
-        for section in ("Key Highlights:", "Search Keywords:"):
-            self.assertIn(section, seo["description"])
+        self.assertIn("REAL SEARCH QUERIES", prompt)
+        self.assertIn("- rust connection pooling", prompt)
+        self.assertIn("TRENDING TERMS", prompt)
+        self.assertIn("TITLES THAT WORKED ON THIS CHANNEL", prompt)
+        self.assertIn("- Tokio in 30 seconds", prompt)
+        bare = short_pipeline.build_seo_prompt("takes", 30.0, 80, "ctx")
+        self.assertNotIn("REAL SEARCH QUERIES", bare)
+
+    def test_split_signal_arg(self):
+        self.assertEqual(short_pipeline.split_signal_arg(" a | b |a|| "),
+                         ["a", "b"])
+        self.assertEqual(short_pipeline.split_signal_arg(None), [])
 
 
 class ExtractSeoDocTests(unittest.TestCase):
@@ -1228,6 +1484,47 @@ class StreamClipTests(unittest.TestCase):
         self.assertEqual(stream_clip.format_section_time(754), "00:12:34")
         self.assertEqual(stream_clip.format_section_time(45), "00:00:45")
 
+    def test_download_writes_source_marker_for_storage_cleanup(self):
+        saved_run = stream_clip._run
+        with tempfile.TemporaryDirectory() as tmp:
+            output = os.path.join(tmp, "talk_clip1.mp4")
+
+            def fake_run(cmd, timeout):
+                with open(output, "wb") as fh:
+                    fh.write(b"mp4")
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            stream_clip._run = fake_run
+            try:
+                stream_clip.download_section("https://youtu.be/abcdefghijk", 10, 40, output)
+            finally:
+                stream_clip._run = saved_run
+            with open(output + ".source.json", encoding="utf-8") as fh:
+                marker = json.load(fh)
+        self.assertEqual(marker["kind"], "stream_clip")
+        self.assertEqual((marker["start"], marker["end"]), (10, 40))
+
+    def test_download_creates_missing_parent_and_returns_absolute_path(self):
+        saved_run = stream_clip._run
+        with tempfile.TemporaryDirectory() as tmp:
+            output = os.path.join(tmp, "nested", "talk_clip1.mp4")
+
+            def fake_run(cmd, timeout):
+                dest = cmd[cmd.index("-o") + 1]
+                with open(dest, "wb") as fh:
+                    fh.write(b"mp4")
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            stream_clip._run = fake_run
+            try:
+                saved = stream_clip.download_section(
+                    "https://youtu.be/abcdefghijk", 10, 40, output)
+            finally:
+                stream_clip._run = saved_run
+            self.assertEqual(saved, os.path.abspath(output))
+            self.assertTrue(os.path.isfile(saved))
+            self.assertTrue(os.path.isfile(saved + ".source.json"))
+
     def test_download_error_hides_urls_and_explains_403(self):
         stderr = (
             "ERROR: [youtube] Unable to download: "
@@ -1361,7 +1658,7 @@ class StreamAgentTests(unittest.TestCase):
         self.assertIn("hello", clips[0]["text"])
         self.assertEqual(clips[0]["reason"], "hook")
 
-    def test_failed_agent_falls_back_to_heuristic(self):
+    def test_failed_selected_agent_reports_failure_without_heuristic_substitute(self):
         import io as _io
         from contextlib import redirect_stderr, redirect_stdout
         words, duration = self._words()
@@ -1377,11 +1674,9 @@ class StreamAgentTests(unittest.TestCase):
                     "--threshold", "0.0", "--min-length", "5",
                     "--max-length", "60",
                 ])
-            self.assertEqual(rc, 0)
-            doc = json.loads(out.getvalue())
-            self.assertEqual(doc["picker"], "heuristic")
-            self.assertIn("unknown agent", doc["picker_note"])
-            self.assertGreater(len(doc["clips"]), 0)
+            self.assertEqual(rc, 1)
+            self.assertEqual(out.getvalue(), "")
+            self.assertIn("unknown agent", err.getvalue())
         finally:
             os.remove(path)
 
@@ -1570,6 +1865,103 @@ class StreamLiveProbeTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("live right now", err.getvalue())
 
+    def test_live_status_is_live_without_is_live_flag(self):
+        real_run = self._stub_run({
+            "title": "Friday stream",
+            "channel": "chan",
+            "thumbnails": [],
+            "duration": None,
+            "live_status": "is_live",
+        })
+        try:
+            meta = stream_clip.probe_url("https://www.youtube.com/watch?v=live")
+        finally:
+            stream_clip._run = real_run
+        self.assertTrue(meta["is_live"])
+        self.assertEqual(meta["duration"], 0.0)
+
+    def test_post_live_and_upcoming_are_unfinished(self):
+        for status in ("post_live", "is_upcoming"):
+            real_run = self._stub_run({
+                "title": "Processing",
+                "channel": "chan",
+                "thumbnails": [],
+                "duration": 0,
+                "is_live": False,
+                "was_live": status == "post_live",
+                "live_status": status,
+            })
+            try:
+                meta = stream_clip.probe_url("https://www.youtube.com/watch?v=live")
+            finally:
+                stream_clip._run = real_run
+            self.assertTrue(meta["is_live"], status)
+
+    def test_was_live_without_duration_is_unfinished(self):
+        real_run = self._stub_run({
+            "title": "Processing VOD",
+            "channel": "chan",
+            "thumbnails": [],
+            "duration": None,
+            "is_live": False,
+            "was_live": True,
+            "live_status": "was_live",
+        })
+        try:
+            meta = stream_clip.probe_url("https://www.youtube.com/watch?v=vod")
+        finally:
+            stream_clip._run = real_run
+        self.assertTrue(meta["is_live"])
+
+    def test_was_live_vod_with_duration_is_ready(self):
+        real_run = self._stub_run({
+            "title": "VOD",
+            "channel": "chan",
+            "thumbnails": [],
+            "duration": 3600,
+            "is_live": False,
+            "was_live": True,
+            "live_status": "was_live",
+        })
+        try:
+            meta = stream_clip.probe_url("https://www.youtube.com/watch?v=vod")
+        finally:
+            stream_clip._run = real_run
+        self.assertFalse(meta["is_live"])
+        self.assertEqual(meta["duration"], 3600.0)
+
+    def test_suggest_refuses_post_live_before_transcript(self):
+        import io as _io
+        from contextlib import redirect_stderr, redirect_stdout
+        real_run = self._stub_run({
+            "title": "Just ended",
+            "channel": "chan",
+            "thumbnails": [],
+            "duration": None,
+            "is_live": False,
+            "live_status": "post_live",
+        })
+        try:
+            out, err = _io.StringIO(), _io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = stream_clip.main(
+                    ["--suggest", "--url", "https://www.youtube.com/live/abc"])
+        finally:
+            stream_clip._run = real_run
+        self.assertEqual(rc, 1)
+        self.assertIn("live right now", err.getvalue())
+        self.assertEqual(out.getvalue().strip(), "")
+
+    def test_is_unfinished_live_covers_yt_dlp_shapes(self):
+        self.assertTrue(stream_clip.is_unfinished_live({"is_live": True}))
+        self.assertTrue(stream_clip.is_unfinished_live({"live_status": "is_live"}))
+        self.assertTrue(stream_clip.is_unfinished_live({"live_status": "post_live", "is_live": False}))
+        self.assertTrue(stream_clip.is_unfinished_live({"was_live": True, "duration": None}))
+        self.assertFalse(stream_clip.is_unfinished_live({"is_live": False, "live_status": "was_live", "was_live": True, "duration": 120}))
+        self.assertFalse(stream_clip.is_unfinished_live({"is_live": False, "live_status": "not_live", "duration": 10}))
+        self.assertFalse(stream_clip.is_unfinished_live({}))
+        self.assertFalse(stream_clip.is_unfinished_live(None))
+
 
 class SeoCoreTests(unittest.TestCase):
     def test_normalize_hashtags_dedupe_and_backfill(self):
@@ -1623,8 +2015,9 @@ class SeoCoreTests(unittest.TestCase):
         self.assertGreaterEqual(payload["quality_score"], 0)
         self.assertLessEqual(payload["quality_score"], 100)
         check_ids = {c["id"] for c in payload["quality_checks"]}
-        for expected in ("title_keyword_frontload", "description_keyword_block",
-                         "tags_keyword_coverage", "hashtags_count"):
+        for expected in ("title_query_match", "title_mobile_fit",
+                         "hook_strength", "description_above_fold",
+                         "description_no_stuffing", "hashtags_count"):
             self.assertIn(expected, check_ids)
         # Phrases widen the bench without invented filler.
         self.assertTrue(any(" " in tag for tag in payload["tags"]))
@@ -1640,13 +2033,67 @@ class SeoCoreTests(unittest.TestCase):
             "Stop doing this with rust",
             "About Rust. Covered: async; pooling.",
             ["async deep dive", "pooling fix"],
-            tags, hashtags, cta="Subscribe for more!",
+            hashtags, cta="Subscribe for more!",
         )
         full = seo.score_seo("Rust async pooling fix", desc, tags,
-                             hashtags, ["rust", "async"], retention=90)
+                             hashtags, ["rust", "async"], retention=90,
+                             queries=["rust async pooling"])
         thin = seo.score_seo("", "", [], [], [], retention=0)
         self.assertGreater(full["seo_score"], thin["seo_score"])
         self.assertGreater(full["quality_score"], 60)
+
+    def test_scorer_prefers_clean_query_title_over_stuffed_package(self):
+        tags = ["rust", "tokio", "deadpool", "connection pooling", "async"]
+        hashtags = ["#rust", "#tokio", "#deadpool"]
+        clean_desc = seo.build_description(
+            "Your Rust pool is leaking connections.",
+            "Fix rust connection pooling with deadpool in 60 seconds.",
+            ["Why tokio pools leak"], hashtags, cta="Follow for more Rust.")
+        stuffed_desc = ("Watch now!\n\n\U0001F50D Search Keywords:\n"
+                        + ", ".join(["kw%d" % i for i in range(20)])
+                        + "\n\n" + " ".join(hashtags))
+        queries = ["rust connection pooling"]
+        clean = seo.score_seo("Rust connection pooling in 60s", clean_desc,
+                              tags, hashtags, [], queries=queries,
+                              hook="Your Rust pool is leaking connections.")
+        stuffed = seo.score_seo("THE BEST INSANE SECRET TRICK EVER",
+                                stuffed_desc, tags * 3, hashtags, [],
+                                queries=queries)
+        self.assertGreater(clean["quality_score"],
+                           stuffed["quality_score"] + 30)
+        got = {c["id"]: c["got"] for c in stuffed["checks"]}
+        self.assertEqual(got["description_no_stuffing"], 0)
+        self.assertEqual(got["title_not_shouting"], 0)
+
+    def test_hook_panel_weakest_link(self):
+        strong = seo.score_hook(
+            "You are wasting 3 hours a week on Rust builds, and nobody "
+            "tells you why")
+        weak = seo.score_hook("hey guys welcome back")
+        self.assertGreater(strong["verdict"], weak["verdict"])
+        self.assertIn(weak["weakest"], seo.HOOK_FIXES)
+        self.assertEqual(seo.score_hook("")["verdict"], 0)
+
+    def test_query_hit_and_title_lint(self):
+        self.assertTrue(seo.query_hit("Connection pooling in Rust",
+                                      ["rust connection pooling"]))
+        self.assertFalse(seo.query_hit("Cooking pasta fast",
+                                       ["rust connection pooling"]))
+        lint = seo.lint_title("THE BEST INSANE trick")
+        self.assertTrue(lint["shouting"])
+        self.assertIn("best", lint["vague"])
+        self.assertTrue(seo.lint_title("Rust in 60s")["mobile_fit"])
+
+    def test_camel_case_hashtags_converge(self):
+        self.assertEqual(seo.normalize_hashtag("RustAsync"), "#rustasync")
+        out = seo.normalize_hashtags(["rust async"], ["#RustAsync"])
+        self.assertEqual(out, ["#rustasync"])
+
+    def test_strip_keyword_block_inline_and_next_line(self):
+        inline = "Hook\n\nSearch Keywords: a, b, c\n\n#a"
+        self.assertEqual(seo.strip_keyword_block(inline), "Hook\n\n#a")
+        nextline = "Hook\n\U0001F50D Search Keywords:\na, b\n#a"
+        self.assertEqual(seo.strip_keyword_block(nextline), "Hook\n#a")
 
     def test_scorer_penalizes_overlong_titles(self):
         tags = ["rust"]

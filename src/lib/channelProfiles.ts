@@ -15,6 +15,8 @@ export interface ChannelProfile {
   tone: string;
   cta: string;
   keywords: string[];
+  /** YouTube category id sent on upload (e.g. "28" Science & Technology). */
+  youtubeCategory?: string;
 }
 
 export interface KeyValueStorage {
@@ -70,6 +72,7 @@ export function seedProfiles(storage: KeyValueStorage): ChannelProfile[] {
       tone: "Fast-paced, punchy, and practical",
       cta: "Subscribe for daily tech & developer guides!",
       keywords: ["ai tools", "coding agents", "tauri", "rust", "saas"],
+      youtubeCategory: "28",
     },
   ];
 }

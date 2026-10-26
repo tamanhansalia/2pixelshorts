@@ -1,4 +1,5 @@
 import { invoke } from "./invoke.ts";
+import { transcriptionInvokeParams } from "./transcription.ts";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { isTauri } from "./ipc.ts";
 import type {
@@ -21,6 +22,7 @@ function toInvokeParams(params: RenderShortParams) {
     presetId: params.preset_id,
     aspectRatio: params.aspect_ratio || null,
     agentId: params.agent_id || null,
+    modelId: params.model_id?.trim() || null,
     subtitleStyle: params.subtitle_style || null,
     subtitlePosition: params.subtitle_position || null,
     subtitleSize: params.subtitle_size || null,
@@ -30,13 +32,17 @@ function toInvokeParams(params: RenderShortParams) {
     cutStart: params.cut_start ?? null,
     cutEnd: params.cut_end ?? null,
     promptHook: params.prompt_hook || null,
-    elevenlabsKey: params.elevenlabs_key || null,
+    ...transcriptionInvokeParams(params.elevenlabs_key, params.transcription_provider),
     channelContext: params.channel_context || null,
     metaTitle: params.meta_title || null,
     metaDesc: params.meta_desc || null,
     metaTags: params.meta_tags || null,
     layout: params.layout || null,
     faceRoi: params.face_roi || null,
+    editPlan: params.edit_plan ?? null,
+    editStrategy: params.edit_strategy ?? null,
+    removeSilence: params.remove_silence ?? null,
+    removeRetakes: params.remove_retakes ?? null,
   };
 }
 
@@ -44,36 +50,21 @@ export async function startRenderJob(params: RenderShortParams): Promise<string>
   if (isTauri()) {
     return await invoke<string>("start_render_job", toInvokeParams(params));
   }
-  return startSimulatedJob(params);
+  throw new Error("Open the 2pixelshorts desktop app to render with video-use. Browser preview cannot edit videos.");
 }
 
 export async function getJobStatus(jobId: string): Promise<RenderJobInfo> {
   if (isTauri()) {
     return await invoke<RenderJobInfo>("get_job_status", { jobId });
   }
-  const job = simulatedJobs.get(jobId);
-  if (!job) throw new Error(`Unknown job id: ${jobId}`);
-  return { ...job };
+  throw new Error(`No native render job available: ${jobId}`);
 }
 
 export async function cancelJob(jobId: string): Promise<boolean> {
   if (isTauri()) {
     return await invoke<boolean>("cancel_job", { jobId });
   }
-  const sim = simulatedTimers.get(jobId);
-  const job = simulatedJobs.get(jobId);
-  if (sim) {
-    clearInterval(sim.timer);
-    simulatedTimers.delete(jobId);
-  }
-  if (job && !isTerminalJobStatus(job.status)) {
-    job.status = "cancelled";
-    job.finished_at = new Date().toISOString();
-    job.error = "Cancelled by user";
-    emitSimulatedFinished(job);
-    return true;
-  }
-  return false;
+  throw new Error(`No native render job available: ${jobId}`);
 }
 
 export async function listenRenderProgress(
@@ -84,10 +75,7 @@ export async function listenRenderProgress(
       cb(event.payload);
     });
   }
-  simulatedProgressListeners.add(cb);
-  return () => {
-    simulatedProgressListeners.delete(cb);
-  };
+  return () => {};
 }
 
 export async function probeAgent(agentId: string): Promise<AgentProbe> {
@@ -96,18 +84,46 @@ export async function probeAgent(agentId: string): Promise<AgentProbe> {
   }
   return {
     agent: agentId,
-    available: true,
+    available: false,
     binary: agentId,
     path: null,
-    note: "simulated",
+    note: "Editing models are only available in the desktop app",
   };
 }
 
-/** Agent id for the no-AI automatic head-cut. Never needs a CLI probe. */
+/** Agent id for the local automatic cleanup. Never needs a CLI probe. */
 export const AUTO_CUT_AGENT_ID = "auto";
 
 export function needsAgentProbe(agentId: string): boolean {
   return agentId !== AUTO_CUT_AGENT_ID;
+}
+
+/** CLIs Title & tags may call, in the same order Studio lists them. */
+export const SEO_AGENT_ORDER = ["claude", "codex", "agy", "grok"] as const;
+
+/**
+ * CLI for a Title & tags package. The cut and the package are separate:
+ * Auto cut still uses the first installed CLI. A chosen CLI wins when it
+ * is installed or not yet probed. When every probe has returned and none
+ * are installed, returns undefined so the engine composes from the
+ * transcript. Before any probe exists, returns the first id — the engine
+ * falls back to that composition if the binary is missing.
+ */
+export function seoAgentForPackage(
+  selectedAgent: string | null | undefined,
+  probes: Record<string, { available?: boolean } | undefined>,
+  order: readonly string[] = SEO_AGENT_ORDER,
+): string | undefined {
+  const ids = order.filter((id) => id && id !== AUTO_CUT_AGENT_ID);
+  const selected = (selectedAgent ?? "").trim();
+  if (selected && selected !== AUTO_CUT_AGENT_ID) {
+    const row = probes[selected];
+    if (!row || row.available !== false) return selected;
+  }
+  const installed = ids.find((id) => probes[id]?.available === true);
+  if (installed) return installed;
+  if (!ids.some((id) => probes[id])) return ids[0];
+  return undefined;
 }
 
 export interface RenderWarning {
@@ -185,7 +201,7 @@ export function autoCutProbe(): AgentProbe {
     available: true,
     binary: "auto",
     path: null,
-    note: "Automatic head-cut; no agent CLI is invoked",
+    note: "Silence and retake cleanup; no agent CLI is invoked",
   };
 }
 
@@ -197,99 +213,5 @@ export async function listenRenderFinished(
       cb(event.payload);
     });
   }
-  simulatedFinishedListeners.add(cb);
-  return () => {
-    simulatedFinishedListeners.delete(cb);
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Browser-preview simulation (non-Tauri only). Mirrors the real event shapes
-// so the job UI is fully exercisable under plain `vite dev`.
-// ---------------------------------------------------------------------------
-
-const SIM_LINES = [
-  "[STAGE 1/4] Probing audio & phrase cues",
-  "[STAGE 2/4] AI Agent selected viral cuts",
-  "[STAGE 3/4] Trimming dead pauses & baking 30ms anti-pop crossfades",
-  "[STAGE 4/4] 9:16 Vertical crop, grade & subtitles",
-  "[COMPLETE] 9:16 Short rendered",
-];
-
-const simulatedJobs = new Map<string, RenderJobInfo>();
-const simulatedTimers = new Map<string, { timer: ReturnType<typeof setInterval> }>();
-const simulatedProgressListeners = new Set<(p: RenderJobProgress) => void>();
-const simulatedFinishedListeners = new Set<(info: RenderJobInfo) => void>();
-
-function emitSimulatedProgress(p: RenderJobProgress) {
-  simulatedProgressListeners.forEach((cb) => cb(p));
-}
-
-function emitSimulatedFinished(info: RenderJobInfo) {
-  simulatedFinishedListeners.forEach((cb) => cb({ ...info }));
-}
-
-let simCounter = 0;
-
-function startSimulatedJob(params: RenderShortParams): string {
-  simCounter += 1;
-  const id = `sim-job-${Date.now()}-${simCounter}`;
-  const job: RenderJobInfo = {
-    id,
-    kind: "render",
-    status: "running",
-    progress: 0,
-    stage: "Starting pipeline",
-    input_video: params.input_video,
-    output_video: params.output_video,
-    created_at: new Date().toISOString(),
-    finished_at: null,
-    result: null,
-    error: null,
-  };
-  simulatedJobs.set(id, job);
-
-  let step = 0;
-  const timer = setInterval(() => {
-    const current = simulatedJobs.get(id);
-    if (!current || isTerminalJobStatus(current.status)) {
-      clearInterval(timer);
-      simulatedTimers.delete(id);
-      return;
-    }
-    const line = SIM_LINES[step];
-    const progress = (step + 1) / SIM_LINES.length;
-    current.progress = progress;
-    current.stage = line;
-    const done = step === SIM_LINES.length - 1;
-    emitSimulatedProgress({ job_id: id, progress, stage: line, line, done });
-    step += 1;
-    if (done) {
-      clearInterval(timer);
-      simulatedTimers.delete(id);
-      const result: CommandOutput = {
-        success: true,
-        code: 0,
-        stdout: `${SIM_LINES.join("\n")}\n[COMPLETE] 9:16 Short rendered: ${params.output_video}`,
-        stderr: "video-use engine (simulated): cuts extracted, 30ms crossfade applied.",
-        fallback_used: false,
-      };
-      current.status = "completed";
-      current.finished_at = new Date().toISOString();
-      current.result = result;
-      emitSimulatedFinished(current);
-    }
-  }, 350);
-
-  simulatedTimers.set(id, { timer });
-  return id;
-}
-
-/** Test-only: reset simulation state between tests. */
-export function __resetJobSimulationForTests() {
-  simulatedTimers.forEach(({ timer }) => clearInterval(timer));
-  simulatedTimers.clear();
-  simulatedJobs.clear();
-  simulatedProgressListeners.clear();
-  simulatedFinishedListeners.clear();
+  return () => {};
 }

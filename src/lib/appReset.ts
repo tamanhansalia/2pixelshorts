@@ -1,6 +1,9 @@
 import { STUDIO_STORE_KEY } from "./studioProjects.ts";
 import { RENDER_HISTORY_KEY } from "./renderHistory.ts";
 import { STREAM_RUNS_KEY } from "./streamRuns.ts";
+import { TRANSCRIPTION_PROVIDER_KEY } from "./transcription.ts";
+import { PERFORMANCE_KEY, TREND_SIGNALS_KEY } from "./performance.ts";
+import { PINNED_COMMENTS_KEY } from "./publishExtras.ts";
 import {
   DEFAULT_KEY,
   LEGACY_CONTEXT_KEY,
@@ -11,7 +14,8 @@ import {
 /**
  * Complete local reset: every key the app persists in this origin.
  * API credentials, queue, render history, studio drafts, channel
- * profiles, and sidebar UI state. Deliberately NOT included: the UI
+ * profiles, post performance, SEO trend signals, pinned comments, and
+ * sidebar UI state. Deliberately NOT included: the UI
  * theme preference (appearance, not data).
  */
 
@@ -33,6 +37,10 @@ export const APP_STORAGE_KEYS: string[] = [
   DEFAULT_KEY,
   LEGACY_CONTEXT_KEY,
   SIDEBAR_GROUPS_KEY,
+  TRANSCRIPTION_PROVIDER_KEY,
+  PERFORMANCE_KEY,
+  TREND_SIGNALS_KEY,
+  PINNED_COMMENTS_KEY,
 ];
 
 /** Remove every app key from storage; returns the keys removed. Best-effort per key. */

@@ -30,7 +30,7 @@ export const PageHeader: React.FC<PageHeaderProps> = ({
       className,
     )}
   >
-    <div className="min-w-0">
+    <div className="min-w-0 flex-1 basis-64">
       {eyebrow && (
         <div className="mb-1 text-xs font-medium text-muted">{eyebrow}</div>
       )}
@@ -38,13 +38,13 @@ export const PageHeader: React.FC<PageHeaderProps> = ({
         {title}
       </h1>
       {description && (
-        <div className="tabular-nums mt-1 truncate text-sm text-muted">
+        <div className="tabular-nums mt-1 text-sm leading-relaxed text-muted">
           {description}
         </div>
       )}
     </div>
     {actions && (
-      <div className="flex shrink-0 flex-wrap items-center gap-2">{actions}</div>
+      <div className="flex max-w-full flex-wrap items-center gap-2">{actions}</div>
     )}
   </header>
 );

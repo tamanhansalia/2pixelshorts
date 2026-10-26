@@ -110,5 +110,14 @@ pub struct SocialPublishPayload {
     /// Queue entry id, sent as `Idempotency-Key` so gateway retries are safe.
     #[serde(default)]
     pub idempotency_key: Option<String>,
+    /// Postable hashtags for captions (preferred over tags-as-hashtags).
+    #[serde(default)]
+    pub hashtags: Option<Vec<String>>,
+    /// YouTube pinned first comment (engagement prompt).
+    #[serde(default)]
+    pub first_comment: Option<String>,
+    /// YouTube category id, e.g. "28" Science & Technology.
+    #[serde(default)]
+    pub youtube_category: Option<String>,
 }
 

@@ -46,3 +46,12 @@ edit_tmp/
 takes_packed.md
 words.json
 edl.json
+*.framing.json
+*.edit.json
+*.source.json
+*.words.json
+*.takes_packed.md
+*.edl.json
+
+# October desktop — local canvas state
+.october/

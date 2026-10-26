@@ -1,3 +1,4 @@
+import { notify } from "../../lib/notify";
 import React from "react";
 import {
   AlertCircle,
@@ -145,7 +146,7 @@ export const RenderJobsPanel: React.FC<RenderJobsPanelProps> = ({
               <>
                 <AlertCircle className={`size-3.5 ${job.status === "cancelled" ? "text-muted" : "text-danger"}`} />
                 <span className="line-clamp-2 text-xs text-muted">
-                  {job.error || (job.status === "cancelled" ? "Cancelled by user" : "Render failed")}
+                  <button type="button" className="underline" onClick={() => notify(job.status === "cancelled" ? "Render cancelled" : "Render failed", job.error || "No further details available.", job.status === "cancelled" ? "info" : "error")}>View details</button>
                 </span>
               </>
             )}

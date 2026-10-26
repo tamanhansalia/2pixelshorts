@@ -44,22 +44,29 @@ import {
   saveRenderHistory,
   type RenderHistoryEntry,
 } from "./lib/renderHistory";
+import { renderWarningsFor } from "./lib/jobs";
 import { notify } from "./lib/notify";
+import { buildStorageScope, recordsAfterCleanup, type StorageDeleteReport } from "./lib/storage";
+import { isBusyClipJob } from "./lib/streamAnalysis";
+import { useStreamAnalysis } from "./lib/useStreamAnalysis";
+import { useLiveWatcher } from "./lib/useLiveWatcher";
+import { streamSuggestOptions } from "./lib/streamClips";
 import { createLatestGuard } from "./lib/asyncLatest";
+import { loadTranscriptionProvider, saveTranscriptionProvider, type TranscriptionProvider } from "./lib/transcription";
 import { clearApiKeys, loadApiKeys, saveApiKey, type CredentialProvider } from "./lib/credentials";
-import { motion, AnimatePresence, MotionConfig } from "framer-motion";
+import { MotionConfig } from "framer-motion";
 import { useTheme } from "@heroui/react";
 import { ColorMode, NavTab, Sidebar } from "./components/layout/Sidebar";
 import {
   applyStudioSeo,
-  blankStudioDraft,
   buildDraftFromQueue,
   buildSourceEntries,
+  importClipDrafts,
   loadStudioStore,
+  preferredSeoAgent,
   removeSource,
   saveStudioStore,
   selectSource,
-  STUDIO_METADATA_STEP,
   upsertDraft,
   type SourceEntry,
   type StudioProjectDraft,
@@ -94,6 +101,8 @@ import {
 } from "./lib/channelProfiles";
 import { SocialPublisher } from "./components/social/SocialPublisher";
 import { ScheduleQueue, type QueueItemPatch } from "./components/scheduler/ScheduleQueue";
+import { PerformanceView } from "./components/performance/PerformanceView";
+import { usePostPerformance } from "./lib/usePostPerformance";
 import {
   SettingsView,
   SettingsSubTab,
@@ -120,7 +129,7 @@ export function App() {
     if (hash.startsWith("settings")) {
       return "settings";
     }
-    if (["studio", "social", "scheduler"].includes(hash)) {
+    if (["studio", "social", "scheduler", "performance"].includes(hash)) {
       return hash as NavTab;
     }
     return "studio";
@@ -132,6 +141,7 @@ export function App() {
     if (hash === "settings-keys") return "keys";
     if (hash === "settings-channel") return "channel";
     if (hash === "settings-engine") return "engine";
+    if (hash === "settings-storage") return "storage";
     return "clis";
   });
 
@@ -139,7 +149,7 @@ export function App() {
     window.location.hash = activeTab;
   }, [activeTab]);
 
-  const [tools, setTools] = useState<CliToolInfo[]>(ipc.MOCK_TOOLS);
+  const [tools, setTools] = useState<CliToolInfo[]>([]);
   const [isLoadingClis, setIsLoadingClis] = useState(false);
   const [globalTask, setGlobalTask] = useState<GlobalTaskStatus>({
     type: "idle",
@@ -170,10 +180,22 @@ export function App() {
   // Analyzed stream links live here (not in the file-keyed studio
   // store), so clips survive tab switches and appear in the sidebar.
   const [streamRuns, setStreamRuns] = useState(loadStreamRunStore);
+  const { jobs: streamAnalysisJobs, startAnalysis, isRunning: isStreamRunning, dismissJob: dismissStreamJob, stopWatching: stopWatchingStream } = useStreamAnalysis(setStreamRuns, streamRuns);
+  const runningClipJobs = Object.values(streamAnalysisJobs).filter((job) => job.status === "running");
+  const watchingClipJobs = Object.values(streamAnalysisJobs).filter((job) => job.status === "watching");
+  const activeClipJobs = Object.values(streamAnalysisJobs).filter(isBusyClipJob);
+  const clipActivity = Object.values(streamAnalysisJobs).map((job) => ({
+    ...job,
+    title: streamRuns.runs[job.url]?.probe?.title || streamRuns.runs[job.url]?.result?.title || job.url,
+  }));
+  const streamOpenSequence = useRef(0);
+  const [selectedStreamUrl, setSelectedStreamUrl] = useState<string | null>(null);
   const [pendingStream, setPendingStream] = useState<{
     url: string;
     key: number;
   } | null>(null);
+  /** Plus asked for an empty Studio; stays until a file or stream is chosen. */
+  const [startBlankStudio, setStartBlankStudio] = useState(false);
 
   useEffect(() => {
     saveStreamRunStore(streamRuns);
@@ -189,6 +211,7 @@ export function App() {
   }, [studioStore]);
 
   const handleDraftChange = useCallback((draft: StudioProjectDraft) => {
+    if (draft.inputPath.trim()) setStartBlankStudio(false);
     setStudioStore((prev) => {
       if (!draft.inputPath.trim()) return prev;
       const next = upsertDraft(prev, draft);
@@ -224,7 +247,9 @@ export function App() {
       // the user is looking at another tab.
       if (activeTabRef.current !== "studio") {
         if (info.status === "completed" && info.result?.success) {
-          notify("Short rendered", `Output saved to ${info.output_video}`, "success");
+          const warnings = renderWarningsFor(info.result);
+          if (warnings.length) notify("Short rendered with warnings", warnings.map(w => [w.message, w.detail].filter(Boolean).join(" — ")).join("\n"), "warning");
+          else notify("Short rendered", `Output saved to ${info.output_video}`, "success");
         } else if (info.status === "cancelled") {
           notify("Render cancelled", "The background job was stopped", "info");
         } else {
@@ -344,6 +369,13 @@ export function App() {
 
   const [zernioKey, setZernioKey] = useState("");
   const [elevenLabsKey, setElevenLabsKey] = useState("");
+  const [transcriptionProvider, setTranscriptionProvider] = useState<TranscriptionProvider>(loadTranscriptionProvider);
+  const handleTranscriptionProviderChange = (provider: TranscriptionProvider) => {
+    try {
+      saveTranscriptionProvider(provider);
+      setTranscriptionProvider(provider);
+    } catch { notify("Could not save transcription provider", "Check local storage access and retry.", "error"); }
+  };
   const [youtubeKey, setYoutubeKey] = useState("");
   const [credentialsReady, setCredentialsReady] = useState(false);
   useEffect(() => {
@@ -368,7 +400,7 @@ export function App() {
     const requestId = transcriptionGuardRef.current.next();
     let disposed = false;
     ipc
-      .probeTranscription(elevenLabsKey)
+      .probeTranscription(elevenLabsKey, transcriptionProvider)
       .then((status) => {
         if (!disposed && transcriptionGuardRef.current.isLatest(requestId)) {
           setTranscription(status);
@@ -383,7 +415,20 @@ export function App() {
       disposed = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [elevenLabsKey]);
+  }, [elevenLabsKey, transcriptionProvider]);
+
+  useLiveWatcher(
+    streamRuns,
+    setStreamRuns,
+    isStreamRunning,
+    startAnalysis,
+    (run) => ({
+      ...streamSuggestOptions({ agentId: run.agent }),
+      elevenlabsKey: elevenLabsKey,
+      transcriptionProvider,
+    }),
+  );
+
   const [channelProfiles, setChannelProfiles] = useState<ChannelProfile[]>(() => {
     return loadProfiles();
   });
@@ -424,6 +469,10 @@ export function App() {
     return [];
   });
 
+  // Published-post metrics: the SEO feedback loop (winning titles steer
+  // every new analysis; see lib/performance).
+  const postPerformance = usePostPerformance(queue, zernioKey);
+
   // Save queue on change
   useEffect(() => {
     localStorage.setItem(SCHEDULE_QUEUE_KEY, JSON.stringify(queue));
@@ -444,14 +493,17 @@ export function App() {
 
   const handleSelectSource = useCallback(
     (id: string) => {
+      setStartBlankStudio(false);
+      setSelectedStreamUrl(null);
+      setPendingStream(null);
       setStudioStore((prev) => {
         const existing = prev.projects[id];
         const queued = queue.find((q) => q.video_path === id);
         const draft: StudioProjectDraft =
           existing ?? buildDraftFromQueue(queued ?? { video_path: id, title: "" });
-        // Sidebar selection always lands on the Metadata (SEO) step —
-        // title, tags, and description for the upload — with Render next.
-        const landed = { ...draft, inputPath: id, activeStep: STUDIO_METADATA_STEP };
+        // Sidebar selection reopens the same single Studio page; the
+        // draft's saved settings are restored as-is, in flow order.
+        const landed = { ...draft, inputPath: id };
         return selectSource(upsertDraft(prev, landed), id);
       });
       setDraftLoadKey((k) => k + 1);
@@ -461,9 +513,12 @@ export function App() {
   );
 
   // Start a brand-new short: remounts Studio blank (source step) without
-  // touching the saved sources. A render that is still running keeps going
-  // in the background under render history / the jobs dialog.
+  // touching the saved sources or stream library. Clip jobs and renders
+  // keep running in the sidebar / jobs dialog.
   const handleNewSource = useCallback(() => {
+    setStartBlankStudio(true);
+    setSelectedStreamUrl(null);
+    setPendingStream(null);
     setStudioStore((prev) => ({ ...prev, currentId: null }));
     setStudioBlankKey((k) => k + 1);
     setActiveTab("studio");
@@ -471,36 +526,22 @@ export function App() {
 
   // Open a saved stream run: Studio restores its clips on arrival.
   const handleSelectStream = useCallback((url: string) => {
-    setPendingStream((prev) => ({ url, key: (prev?.key ?? 0) + 1 }));
+    setStartBlankStudio(false);
+    setSelectedStreamUrl(url);
+    setPendingStream({ url, key: ++streamOpenSequence.current });
     setActiveTab("studio");
   }, []);
 
   // Import downloaded stream clips as their own sidebar sources: each
   // clip gets a fresh draft (same starting point as an uploaded file)
-  // and the first one opens on the Style step so the 5-step flow
-  // continues immediately; the rest wait in the sidebar.
+  // and the first one opens in Studio so editing continues immediately;
+  // the rest wait in the sidebar.
   const handleImportClipsAsSources = useCallback(
-    (clips: { inputPath: string; metadata: StudioProjectDraft["metadata"] }[]) => {
-      const valid = clips.filter((c) => c.inputPath.trim());
-      if (valid.length === 0) return;
-      setStudioStore((prev) => {
-        let next = prev;
-        // Reverse so the sidebar keeps clip order: upsertDraft moves
-        // each entry to the front, leaving valid[0] most-recent first.
-        for (const clip of [...valid].reverse()) {
-          const draft: StudioProjectDraft = {
-            ...blankStudioDraft(),
-            inputPath: clip.inputPath,
-            metadata: clip.metadata,
-            // Style step: the source is set, taste choices come next.
-            activeStep: 1,
-            updatedAt: new Date().toISOString(),
-            createdAt: new Date().toISOString(),
-          };
-          next = upsertDraft(next, draft);
-        }
-        return { ...next, currentId: valid[0].inputPath };
-      });
+    (clips: { inputPath: string; metadata: StudioProjectDraft["metadata"]; title?: string }[]) => {
+      if (clips.every((clip) => !clip.inputPath.trim())) return;
+      setStartBlankStudio(false);
+      setSelectedStreamUrl(null);
+      setStudioStore((prev) => importClipDrafts(prev, clips));
       setDraftLoadKey((k) => k + 1);
       setActiveTab("studio");
     },
@@ -508,8 +549,18 @@ export function App() {
   );
 
   const handleRemoveStream = useCallback((url: string) => {
+    if (isStreamRunning(url)) return;
+    const wasOpen = selectedStreamUrl === url;
     setStreamRuns((prev) => removeStreamRun(prev, url));
-  }, []);
+    stopWatchingStream(url);
+    dismissStreamJob(url);
+    setPendingStream((prev) => (prev?.url === url ? null : prev));
+    setSelectedStreamUrl((prev) => (prev === url ? null : prev));
+    if (wasOpen && !studioStore.currentId) {
+      setStartBlankStudio(true);
+      setStudioBlankKey((k) => k + 1);
+    }
+  }, [isStreamRunning, stopWatchingStream, dismissStreamJob, selectedStreamUrl, studioStore.currentId]);
 
   // Remove sidebar rows: drops each row's studio draft plus its linked
   // queue rows, so entries cannot reappear via the queue. Rendering rows
@@ -591,7 +642,7 @@ export function App() {
   const triggerToast = (
     title: string,
     description?: string,
-    type: "success" | "error" | "info" = "info",
+    type: "success" | "error" | "info" | "warning" = "info",
   ) => {
     notify(title, description, type);
   };
@@ -608,7 +659,34 @@ export function App() {
   // Complete local reset: wipe every persisted key, then reload so all
   // state re-initializes from empty (API keys cleared, queue/history/
   // projects/profiles gone, defaults re-seeded on next launch).
+  // Settings > Storage scans the folders these records point at and
+  // protects files still rendering or waiting to publish.
+  const storageScope = useMemo(
+    () => buildStorageScope({ history: renderHistory, studio: studioStore, queue, streamRuns }),
+    [renderHistory, studioStore, queue, streamRuns],
+  );
+
+  // Files moved to the Trash take their history rows and Studio sources with them.
+  const handleStorageCleaned = useCallback(
+    (report: StorageDeleteReport) => {
+      if (report.removed_files.length === 0) return;
+      const next = recordsAfterCleanup(renderHistory, studioStore, report.removed_files);
+      if (next.history !== renderHistory) setRenderHistory(next.history);
+      if (next.removedSources.length > 0) {
+        setStudioStore(next.studio);
+        if (studioStore.currentId && next.removedSources.includes(studioStore.currentId)) {
+          setStudioBlankKey((k) => k + 1);
+        }
+      }
+    },
+    [renderHistory, studioStore],
+  );
+
   const handleResetAllData = useCallback(async () => {
+    if (activeClipJobs.length) {
+      notify("Clip finding in progress", "Wait for clip finding to finish before resetting local data", "error");
+      return;
+    }
     if (activeRenders.length) {
       notify("Render in progress", "Cancel active renders before resetting local data", "error");
       return;
@@ -620,7 +698,7 @@ export function App() {
     } catch (error) {
       notify("Reset failed", String(error), "error");
     }
-  }, [activeRenders.length]);
+  }, [activeRenders.length, activeClipJobs.length]);
 
   const saveChannelProfiles = (
     profiles: ChannelProfile[],
@@ -659,6 +737,7 @@ export function App() {
       else if (e.key === "2") setActiveTab("social");
       else if (e.key === "3") setActiveTab("scheduler");
       else if (e.key === "4") setActiveTab("settings");
+      else if (e.key === "5") setActiveTab("performance");
     };
 
     window.addEventListener("keydown", handleKeyDown);
@@ -735,25 +814,25 @@ export function App() {
     return await ipc.runCli(command, args);
   };
 
-  const handleProbeVideo = async (path: string): Promise<VideoMetadata> => {
-    setGlobalTask({ type: "probing", label: "Probing video stream" });
+  const handleProbeVideo = async (
+    path: string,
+    options?: { silent?: boolean },
+  ): Promise<VideoMetadata> => {
+    if (!options?.silent) {
+      setGlobalTask({ type: "probing", label: "Probing video stream" });
+    }
     try {
       const meta = await ipc.probeVideo(path);
-      triggerToast(
-        "Footage probed",
-        `${meta.width}x${meta.height} @ ${meta.fps}fps (${meta.duration_seconds}s)`,
-        "success",
-      );
+      if (!options?.silent) {
+        triggerToast(
+          "Footage probed",
+          `${meta.width}x${meta.height} @ ${meta.fps}fps (${meta.duration_seconds}s)`,
+          "success",
+        );
+      }
       return meta;
-    } catch (err: unknown) {
-      triggerToast(
-        "Probe error",
-        err instanceof Error ? err.message : "ffprobe failed to analyze file",
-        "error",
-      );
-      throw err;
     } finally {
-      setGlobalTask({ type: "idle" });
+      if (!options?.silent) setGlobalTask({ type: "idle" });
     }
   };
 
@@ -815,18 +894,18 @@ export function App() {
   };
 
   // One-shot SEO analysis for the Queue quick-schedule card: same
-  // engine call the Studio uses, with the channel context and (optional)
-  // transcription key. No agent CLI — the transcript-grounded statistical
-  // package is honest without one. Rejects on failure so the card shows
-  // the error instead of template text.
+  // engine call the Studio uses (selected CLI when one is saved, else
+  // composed Auto-cut titles). Rejects on failure so the card shows the
+  // error instead of template text.
   const handleAnalyzeForQueue = async (
     videoPath: string,
   ): Promise<{ title: string; description: string; tags: string[] }> => {
     const meta = await ipc.generateSeoMetadata(
       videoPath,
       getEffectiveContext(""),
-      undefined,
+      preferredSeoAgent(studioStore),
       elevenLabsKey.trim() ? elevenLabsKey.trim() : undefined,
+      transcriptionProvider,
     );
     return {
       title: meta.title,
@@ -862,6 +941,7 @@ export function App() {
         opts.context,
         opts.agentId,
         elevenLabsKey?.trim() ? elevenLabsKey.trim() : undefined,
+        transcriptionProvider,
       );
       if (latestSeoRequests.current.get(targetVideo) !== requestId) return { meta, requestId };
       setSeoJobs((prev) =>
@@ -937,7 +1017,6 @@ export function App() {
             q.id === entry.id ? { ...q, remote_status: remoteStatus } : q,
           ),
         );
-        triggerToast("Publishing failed", msg, "error");
         throw new Error(msg);
       }
       setQueue((prev) =>
@@ -1137,8 +1216,9 @@ export function App() {
       const meta = await ipc.generateSeoMetadata(
         item.video_path,
         getEffectiveContext("") || undefined,
-        undefined,
+        preferredSeoAgent(studioStore),
         elevenLabsKey?.trim() ? elevenLabsKey.trim() : undefined,
+        transcriptionProvider,
       );
       const patch = buildSeoPatch(meta);
       setQueue((prev) =>
@@ -1296,6 +1376,12 @@ export function App() {
     (t) => t.is_available && t.is_enabled,
   ).length;
   const totalCliCount = tools.length;
+  const displayedTask: GlobalTaskStatus =
+    globalTask.type === "idle" && runningClipJobs.length
+      ? { type: "analyzing", label: "Finding clips" }
+      : globalTask.type === "idle" && watchingClipJobs.length
+        ? { type: "analyzing", label: "Waiting for live VOD" }
+        : globalTask;
 
   return (
     <MotionConfig reducedMotion="user">
@@ -1313,34 +1399,30 @@ export function App() {
         onRemoveSource={handleRemoveSource}
         onRemoveSources={handleRemoveSources}
         streams={streamItems}
-        selectedStreamUrl={pendingStream?.url ?? null}
+        selectedStreamUrl={selectedStreamUrl}
         onSelectStream={handleSelectStream}
         onRemoveStream={handleRemoveStream}
+        clipJobs={clipActivity}
+        onDismissClipJob={dismissStreamJob}
       />
 
       <div className="relative flex min-w-0 flex-1 flex-col">
-        {globalTask.type !== "idle" && (
+        {displayedTask.type !== "idle" && (
           <div className="absolute inset-x-0 top-0 z-10">
             <LinearProgress
               progress={
-                globalTask.type === "rendering" &&
-                typeof globalTask.progress === "number"
-                  ? Math.round(globalTask.progress * 100)
+                displayedTask.type === "rendering" &&
+                typeof displayedTask.progress === "number"
+                  ? Math.round(displayedTask.progress * 100)
                   : undefined
               }
             />
           </div>
         )}
 
-        <main className="min-h-0 flex-1 overflow-y-auto [scrollbar-gutter:stable]">
-          <div className="mx-auto w-full max-w-[1280px] px-8 pt-7 pb-12">
-            <AnimatePresence initial={false}>
-              <motion.div
-                key={activeTab}
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                transition={{ duration: 0.12, ease: "easeOut" }}
-              >
+        <main className="app-main min-h-0 min-w-0 flex-1 overflow-y-auto [scrollbar-gutter:stable]">
+          <div className="mx-auto w-full max-w-[1440px] px-4 pt-6 pb-6 lg:px-6 xl:px-8">
+            <div key={activeTab}>
                 {activeTab === "studio" && (
                   <VideoStudio
                     key={studioBlankKey}
@@ -1362,9 +1444,18 @@ export function App() {
                     onImportClipsAsSources={handleImportClipsAsSources}
                     streamRuns={streamRuns}
                     onStreamRunsChange={setStreamRuns}
+                    streamAnalysisJobs={streamAnalysisJobs}
+                    onAnalyzeStream={(url, options, layout) => {
+                      setStartBlankStudio(false);
+                      setSelectedStreamUrl(url);
+                      void startAnalysis(url, options, layout);
+                    }}
+                    onStopWatchingStream={stopWatchingStream}
+                    onRemoveStream={handleRemoveStream}
                     pendingStreamUrl={pendingStream?.url ?? null}
                     streamOpenKey={pendingStream?.key ?? 0}
                     onStreamOpened={() => setPendingStream(null)}
+                    startBlank={startBlankStudio}
                     onQueueOutput={handleQueueOutput}
                     onProbeVideo={handleProbeVideo}
                     onPickVideo={handlePickVideo}
@@ -1432,8 +1523,24 @@ export function App() {
                   />
                 )}
 
+                {activeTab === "performance" && (
+                  <PerformanceView
+                    records={postPerformance.records}
+                    refreshing={postPerformance.refreshing}
+                    onRefresh={() => void postPerformance.refresh(true)}
+                    hasZernioKey={!!zernioKey.trim()}
+                    onOpenSettings={() => {
+                      setActiveTab("settings");
+                      setSettingsSubTab("keys");
+                    }}
+                    onOpenQueue={() => setActiveTab("scheduler")}
+                  />
+                )}
+
                 {activeTab === "settings" && (
                   <SettingsView
+                    transcriptionProvider={transcriptionProvider}
+                    onTranscriptionProviderChange={handleTranscriptionProviderChange}
                     zernioKey={zernioKey}
                     onSaveZernioKey={saveZernioKey}
                     elevenLabsKey={elevenLabsKey}
@@ -1456,15 +1563,17 @@ export function App() {
                     defaultChannelId={defaultChannelId}
                     onSaveChannelProfiles={saveChannelProfiles}
                     onResetAllData={handleResetAllData}
+                    storageScope={storageScope}
+                    onStorageCleaned={handleStorageCleaned}
                   />
                 )}
-              </motion.div>
-            </AnimatePresence>
+            </div>
           </div>
         </main>
 
         <StatusBar
-          globalTask={globalTask}
+          desktop={ipc.isTauri()}
+          globalTask={displayedTask}
           cliAvailable={availableCliCount}
           cliTotal={totalCliCount}
           queueCount={queue.length}
@@ -1472,6 +1581,11 @@ export function App() {
           renderProgress={latestRender?.progress}
           onOpenJobs={() => setIsJobsOpen(true)}
           onOpenClis={navigateToClis}
+          activeClipCount={activeClipJobs.length}
+          onOpenClips={() => {
+            const job = runningClipJobs[0] ?? watchingClipJobs[0];
+            if (job) handleSelectStream(job.url);
+          }}
         />
         <RenderJobsDrawer
           isOpen={isJobsOpen}

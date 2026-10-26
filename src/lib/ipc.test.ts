@@ -49,9 +49,9 @@ describe("probeTranscription browser fallback", () => {
     assert.equal(status.active_engine, "none");
   });
 
-  it("reports elevenlabs when a key is set", async () => {
+  it("reports configured key without pretending the browser can transcribe", async () => {
     const status = await probeTranscription("  secret-key  ");
     assert.equal(status.elevenlabs_key_configured, true);
-    assert.equal(status.active_engine, "elevenlabs");
+    assert.equal(status.active_engine, "none");
   });
 });

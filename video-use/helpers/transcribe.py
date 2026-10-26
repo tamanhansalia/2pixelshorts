@@ -9,80 +9,121 @@ Engine selection (``--engine``):
 - ``elevenlabs``: cloud Scribe; needs ``--elevenlabs-key``.
 - ``local``: on-device faster-whisper; needs ``video-use/.venv``
   (see ``video-use/setup_local_stt.sh``) — no API key, no uploads.
-- Without any engine: writes a placeholder ``{"words": [], ...}`` and
-  exits 0 with a warning on stderr, so the render pipeline degrades to
-  clean video instead of failing.
+- Explicit provider failures return nonzero with a diagnostic document;
+  the app stops instead of silently switching providers or losing captions.
+- Legacy CLI ``auto`` retains placeholder behavior when unavailable.
 
 Stdlib only, except the optional faster-whisper import (lazy, local only).
 """
 
 import argparse
-import io
 import json
+import math
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import urllib.request
+import urllib.error
 import uuid
+import wave
 
 SCRIBE_URL = "https://api.elevenlabs.io/v1/speech-to-text"
 SCRIBE_MODEL = "scribe_v1"
 
-FASTER_WHISPER_DEFAULT_MODEL = "tiny.en"
+def default_local_model():
+    """Prefer an accurate installed model; never download during a render."""
+    try:
+        from huggingface_hub import try_to_load_from_cache
+        for name in ("small.en", "base.en", "tiny.en"):
+            cached = try_to_load_from_cache(f"Systran/faster-whisper-{name}", "model.bin")
+            if isinstance(cached, str) and os.path.isfile(cached):
+                return name
+    except ImportError:
+        pass
+    return "tiny.en"
+
+
+FASTER_WHISPER_DEFAULT_MODEL = default_local_model()
 
 
 class TranscribeError(Exception):
     pass
 
 
-def _multipart_body(fields, file_field, filename, file_bytes, boundary):
-    buf = io.BytesIO()
-    for key, value in fields.items():
-        buf.write(f"--{boundary}\r\n".encode())
-        buf.write(f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode())
-        buf.write(f"{value}\r\n".encode())
-    buf.write(f"--{boundary}\r\n".encode())
-    buf.write(
-        f'Content-Disposition: form-data; name="{file_field}"; filename="{filename}"\r\n'.encode()
-    )
-    buf.write(b"Content-Type: application/octet-stream\r\n\r\n")
-    buf.write(file_bytes)
-    buf.write(b"\r\n")
-    buf.write(f"--{boundary}--\r\n".encode())
-    return buf.getvalue()
+def transcribe_file(media_path, api_key, model_id=SCRIBE_MODEL, timeout=1800):
+    """Upload extracted audio to Scribe with bounded multipart memory.
 
-
-def transcribe_file(media_path, api_key, model_id=SCRIBE_MODEL, timeout=120):
-    """Transcribe via ElevenLabs Scribe. Returns the raw parsed JSON dict."""
-    with open(media_path, "rb") as fh:
-        file_bytes = fh.read()
-    boundary = uuid.uuid4().hex
-    body = _multipart_body(
-        {"model_id": model_id},
-        "file",
-        os.path.basename(media_path),
-        file_bytes,
-        boundary,
-    )
-    req = urllib.request.Request(
-        SCRIBE_URL,
-        data=body,
-        headers={
-            "xi-api-key": api_key,
-            "Content-Type": f"multipart/form-data; boundary={boundary}",
-        },
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    One request, no automatic retries: an ambiguous timeout must not spend
+    the user's allowance twice. Keys stay in the request header only.
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise TranscribeError("Install ffmpeg to extract audio for ElevenLabs transcription")
+    with tempfile.TemporaryDirectory(prefix="scribe_audio_") as directory:
+        audio_path = os.path.join(directory, "audio.flac")
+        try:
+            proc = subprocess.run(
+                [ffmpeg, "-y", "-v", "error", "-i", media_path,
+                 "-vn", "-ac", "1", "-ar", "16000", "-c:a", "flac", audio_path],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise TranscribeError(f"Audio extraction for ElevenLabs failed: {exc}") from exc
+        if proc.returncode or not os.path.isfile(audio_path):
+            raise TranscribeError(f"Audio extraction for ElevenLabs failed: {(proc.stderr or '').strip()[-300:]}")
+        boundary = uuid.uuid4().hex
+        fields = {"model_id": model_id, "timestamps_granularity": "word",
+                  "diarize": "true", "tag_audio_events": "true"}
+        # Spool multipart to disk instead of copying an entire VOD into RAM.
+        with tempfile.TemporaryFile() as body:
+            for key, value in fields.items():
+                body.write(f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n{value}\r\n'.encode())
+            body.write(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="audio.flac"\r\nContent-Type: audio/flac\r\n\r\n'.encode())
+            with open(audio_path, "rb") as audio:
+                shutil.copyfileobj(audio, body, length=1024 * 1024)
+            body.write(f"\r\n--{boundary}--\r\n".encode())
+            length = body.tell()
+            body.seek(0)
+            req = urllib.request.Request(
+                SCRIBE_URL, data=body,
+                headers={"xi-api-key": api_key, "Content-Length": str(length),
+                         "Content-Type": f"multipart/form-data; boundary={boundary}"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    payload = json.loads(resp.read().decode("utf-8"))
+                if not isinstance(payload, dict) or not isinstance(payload.get("words"), list):
+                    raise TranscribeError("ElevenLabs returned an invalid word-timestamp transcript")
+                return payload
+            except urllib.error.HTTPError as exc:
+                detail = exc.read(4096).decode("utf-8", errors="replace").lower()
+                exc.close()
+                if "quota" in detail or "credit" in detail or exc.code == 402:
+                    reason = "account allowance or credits exhausted; check usage in your ElevenLabs dashboard"
+                elif "missing_permissions" in detail:
+                    reason = "key needs Speech-to-Text access; check its permissions in ElevenLabs"
+                elif exc.code == 401:
+                    reason = "API key is invalid or expired; update it in Settings → API keys"
+                elif exc.code == 403:
+                    reason = "key needs Speech-to-Text access; check its permissions in ElevenLabs"
+                elif exc.code == 429:
+                    reason = "rate or concurrency limit reached; wait and retry"
+                else:
+                    reason = "request rejected; check the audio format, account and service status"
+                raise TranscribeError(f"ElevenLabs HTTP {exc.code}: {reason}") from exc
+            except (urllib.error.URLError, OSError, ValueError) as exc:
+                raise TranscribeError("Could not complete the ElevenLabs request. Check your connection and service status; the request was not retried automatically.") from exc
 
 
 def normalize_words(scribe_payload):
     """Normalize a Scribe response to [{"word","start","end"}, ...]."""
     words = []
     for item in scribe_payload.get("words", []) or []:
+        if not isinstance(item, dict) or item.get("type", "word") != "word":
+            continue
         text = item.get("text") or item.get("word") or ""
         text = text.strip()
         if not text:
@@ -91,7 +132,9 @@ def normalize_words(scribe_payload):
             start = float(item.get("start", 0.0))
             end = float(item.get("end", start))
         except (TypeError, ValueError):
-            start, end = 0.0, 0.0
+            continue
+        if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end <= start:
+            continue
         words.append({"word": text, "start": start, "end": end})
     return words
 
@@ -115,7 +158,7 @@ def local_available():
     return True
 
 
-def words_from_faster_segments(segments):
+def words_from_faster_segments(segments, duration=None):
     """Normalize faster-whisper segments (duck-typed) to word dicts."""
     words = []
     for seg in segments or []:
@@ -127,9 +170,63 @@ def words_from_faster_segments(segments):
                 start = float(getattr(item, "start", 0.0))
                 end = float(getattr(item, "end", start))
             except (TypeError, ValueError):
-                start, end = 0.0, 0.0
+                continue
+            if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end <= start:
+                continue
+            if duration is not None:
+                if start >= duration:
+                    continue
+                end = min(end, duration)
             words.append({"word": text, "start": start, "end": end})
     return words
+
+
+def transcribe_audio_windows(model, wav_path, chunk_seconds=300, overlap_seconds=2):
+    """Bound Whisper/VAD memory while retaining original-video word times.
+
+    Neighbouring windows include context on both sides. A word belongs to
+    the window containing its midpoint, so overlap is not repeated in captions.
+    The same loaded model is reused for every window.
+    """
+    words, language = [], ""
+    chunk_path = os.path.join(os.path.dirname(wav_path), "chunk.wav")
+    try:
+        with wave.open(wav_path, "rb") as audio:
+            rate = audio.getframerate()
+            total_frames = audio.getnframes()
+            duration = total_frames / rate
+            step = max(1, int(chunk_seconds * rate))
+            context = max(0, int(overlap_seconds * rate))
+            for first in range(0, total_frames, step):
+                last = min(first + step, total_frames)
+                start_frame = max(0, first - context)
+                end_frame = min(total_frames, last + context)
+                path = wav_path
+                if total_frames > step:
+                    audio.setpos(start_frame)
+                    with wave.open(chunk_path, "wb") as chunk:
+                        chunk.setparams(audio.getparams())
+                        chunk.writeframes(audio.readframes(end_frame - start_frame))
+                    path = chunk_path
+                segments, info = model.transcribe(
+                    path, word_timestamps=True, temperature=0.0,
+                    vad_filter=True,
+                    vad_parameters={"min_silence_duration_ms": 500, "speech_pad_ms": 200},
+                    condition_on_previous_text=False,
+                    hallucination_silence_threshold=1.0,
+                )
+                language = language or getattr(info, "language", "") or ""
+                offset = start_frame / rate
+                for word in words_from_faster_segments(segments, (end_frame - start_frame) / rate):
+                    start, end = word["start"] + offset, word["end"] + offset
+                    if first / rate <= (start + end) / 2 < last / rate:
+                        words.append({"word": word["word"], "start": start, "end": min(end, duration)})
+                if total_frames > step:
+                    print(f"[TRANSCRIBE] Processed {last / rate:.0f}/{duration:.0f}s of source audio", file=sys.stderr)
+    finally:
+        if os.path.isfile(chunk_path):
+            os.remove(chunk_path)
+    return words, language
 
 
 def transcribe_local(media_path, model_id=FASTER_WHISPER_DEFAULT_MODEL):
@@ -153,7 +250,7 @@ def transcribe_local(media_path, model_id=FASTER_WHISPER_DEFAULT_MODEL):
         proc = subprocess.run(
             [ffmpeg, "-y", "-v", "error", "-i", media_path,
              "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", wav_path],
-            capture_output=True, text=True, timeout=600,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600,
         )
         if proc.returncode != 0 or not os.path.isfile(wav_path):
             raise TranscribeError(
@@ -164,18 +261,14 @@ def transcribe_local(media_path, model_id=FASTER_WHISPER_DEFAULT_MODEL):
         except Exception as exc:
             raise TranscribeError(f"whisper model '{model_id}' failed: {exc}")
         try:
-            segments, info = model.transcribe(
-                wav_path, word_timestamps=True, temperature=0.0
-            )
-            segments = list(segments)
+            words, language = transcribe_audio_windows(model, wav_path)
         except Exception as exc:
             raise TranscribeError(f"whisper transcription failed: {exc}")
-        words = words_from_faster_segments(segments)
         text = " ".join(w["word"] for w in words)
         return {
             "source": os.path.basename(media_path),
             "model": f"faster-whisper:{model_id}",
-            "language": getattr(info, "language", "") or "",
+            "language": language,
             "text": text,
             "words": words,
         }
@@ -188,15 +281,15 @@ def transcribe_local(media_path, model_id=FASTER_WHISPER_DEFAULT_MODEL):
             pass
 
 
-def _write_placeholder(args, reason, stderr_note):
+def _write_placeholder(args, reason, stderr_note, return_code=0):
     doc = placeholder_document(args.input, reason)
     with open(args.output, "w", encoding="utf-8") as fh:
         json.dump(doc, fh, indent=2)
     print(stderr_note, file=sys.stderr)
-    return 0
+    return return_code
 
 
-def probe_report(elevenlabs_key="", local_model=FASTER_WHISPER_DEFAULT_MODEL):
+def probe_report(elevenlabs_key="", local_model=FASTER_WHISPER_DEFAULT_MODEL, engine="auto"):
     """Report transcription-engine availability as a JSON-able dict.
 
     Never fails: this is a status readout so the UI can explain upfront
@@ -205,9 +298,9 @@ def probe_report(elevenlabs_key="", local_model=FASTER_WHISPER_DEFAULT_MODEL):
     key_configured = bool((elevenlabs_key or "").strip())
     local = local_available()
     ffmpeg = shutil.which("ffmpeg") is not None
-    if key_configured:
+    if engine in ("auto", "elevenlabs") and key_configured and ffmpeg:
         active = "elevenlabs"
-    elif local and ffmpeg:
+    elif engine in ("auto", "local") and local and ffmpeg:
         active = "local"
     else:
         active = "none"
@@ -236,7 +329,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     if args.probe:
-        print(json.dumps(probe_report(args.elevenlabs_key, args.local_model)))
+        print(json.dumps(probe_report(args.elevenlabs_key, args.local_model, args.engine)))
         return 0
 
     if not args.input or not os.path.isfile(args.input):
@@ -255,16 +348,17 @@ def main(argv=None):
         if not key:
             return _write_placeholder(
                 args, "elevenlabs engine selected but no API key configured",
-                "transcribe.py: no API key, wrote placeholder word JSON",
+                "transcribe.py: ElevenLabs selected but no API key. Save it in Settings → API keys.",
+                return_code=1,
             )
         try:
             payload = transcribe_file(args.input, key, args.model)
-        except Exception as exc:  # network/API failure must not kill the render
+        except Exception as exc:
             print(f"transcribe.py: scribe request failed ({exc}); writing placeholder", file=sys.stderr)
             doc = placeholder_document(args.input, f"scribe request failed: {exc}")
             with open(args.output, "w", encoding="utf-8") as fh:
                 json.dump(doc, fh, indent=2)
-            return 0
+            return 1 if args.engine != "auto" else 0
         words = normalize_words(payload)
         doc = {
             "source": os.path.basename(args.input),
@@ -284,6 +378,7 @@ def main(argv=None):
             return _write_placeholder(
                 args, f"local transcription unavailable: {exc}",
                 f"transcribe.py: local engine failed ({exc}); wrote placeholder",
+                return_code=1 if args.engine != "auto" else 0,
             )
         with open(args.output, "w", encoding="utf-8") as fh:
             json.dump(doc, fh, indent=2)

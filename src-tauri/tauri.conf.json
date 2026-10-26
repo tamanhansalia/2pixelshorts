@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "2pixelshorts — Local CLI Video Studio & Social Publisher",
+        "title": "2pixelshorts \u2014 Local CLI Video Studio & Social Publisher",
         "width": 1280,
         "height": 840,
         "minWidth": 1024,
@@ -21,8 +21,12 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://i.ytimg.com https://img.youtube.com https://static-cdn.jtvnw.net; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost; media-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-src 'none'; form-action 'none'",
-      "devCsp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://i.ytimg.com https://img.youtube.com https://static-cdn.jtvnw.net; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost ws://localhost:* ws://127.0.0.1:*; media-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-src 'none'; form-action 'none'"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://i.ytimg.com https://img.youtube.com https://static-cdn.jtvnw.net; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost; media-src 'self' blob: asset: http://asset.localhost; object-src 'none'; base-uri 'self'; frame-src 'none'; form-action 'none'",
+      "devCsp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://i.ytimg.com https://img.youtube.com https://static-cdn.jtvnw.net; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost ws://localhost:* ws://127.0.0.1:*; media-src 'self' blob: asset: http://asset.localhost; object-src 'none'; base-uri 'self'; frame-src 'none'; form-action 'none'",
+      "assetProtocol": {
+        "enable": true,
+        "scope": []
+      }
     }
   },
   "bundle": {

@@ -1,11 +1,11 @@
+import { notify } from "../../lib/notify";
 import React, { useState } from "react";
 import {
-  AlertCircle,
   CalendarClock,
   FolderOpen,
   Sparkles,
 } from "lucide-react";
-import { Alert, ListBox, Select, Spinner } from "@heroui/react";
+import { ListBox, Select, Spinner } from "@heroui/react";
 import type {
   ScheduleItem,
   SocialPublishPayload,
@@ -57,28 +57,34 @@ export const QuickScheduleCard: React.FC<QuickScheduleCardProps> = ({
   const [scheduledTime, setScheduledTime] = useState(DEFAULT_RELEASE_TIME);
   const [timezone, setTimezone] = useState(DEFAULT_TIMEZONE);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const reportError = (message: string) => notify("Could not schedule video", message, "error");
 
   const handleBrowse = async () => {
-    const picked = await onPickVideo();
-    if (picked) {
-      setVideoPath(picked);
-      setError(null);
+    try {
+      const picked = await onPickVideo();
+      if (picked) setVideoPath(picked);
+    } catch (error) {
+      notify("Could not select video", error instanceof Error ? error.message : String(error), "error");
     }
   };
 
   const handleAnalyze = async () => {
     const path = videoPath.trim();
     if (!path || isAnalyzing) return;
+    if (transcription?.active_engine === "none") {
+      notify("Transcription setup required", "Add an ElevenLabs key in Settings → API keys or install local transcription in Settings → Engine.", "warning");
+      return;
+    }
     setIsAnalyzing(true);
-    setError(null);
+
     try {
       const seo = await onAnalyzeVideo(path);
       setTitle(seo.title);
       setDescription(seo.description);
       setTagsText(seo.tags.join(", "));
+      notify("SEO ready", "Title, description and tags updated.", "success");
     } catch (err: unknown) {
-      setError(
+      reportError(
         err instanceof Error ? err.message : "Analysis failed — try again.",
       );
     } finally {
@@ -98,7 +104,7 @@ export const QuickScheduleCard: React.FC<QuickScheduleCardProps> = ({
 
   const handleSchedule = () => {
     if (blocker) {
-      setError(blocker);
+      reportError(blocker);
       return;
     }
     onQueueShort(
@@ -116,7 +122,7 @@ export const QuickScheduleCard: React.FC<QuickScheduleCardProps> = ({
     setTitle("");
     setDescription("");
     setTagsText("");
-    setError(null);
+
   };
 
   const tagCount = tagsText.trim()
@@ -135,7 +141,6 @@ export const QuickScheduleCard: React.FC<QuickScheduleCardProps> = ({
           <Button
             variant="primary"
             icon={<CalendarClock />}
-            disabled={blocker !== null}
             onClick={handleSchedule}
             title={blocker ?? "Queue this short for scheduled release"}
           >
@@ -191,14 +196,6 @@ export const QuickScheduleCard: React.FC<QuickScheduleCardProps> = ({
                 Transcribing and writing SEO — long videos take a while.
               </p>
             </div>
-          )}
-
-          {transcription && transcription.active_engine === "none" && (
-            <p className="text-xs leading-snug text-warning">
-              No transcription engine is set up, so analysis will fail. Add an
-              ElevenLabs key (Settings → API keys) or install local
-              transcription (Settings → Engine).
-            </p>
           )}
         </div>
 
@@ -279,17 +276,6 @@ export const QuickScheduleCard: React.FC<QuickScheduleCardProps> = ({
             </Select.Popover>
           </Select>
         </Field>
-
-        {error && (
-          <Alert status="danger">
-            <Alert.Indicator>
-              <AlertCircle className="size-4" />
-            </Alert.Indicator>
-            <Alert.Content>
-              <Alert.Description>{error}</Alert.Description>
-            </Alert.Content>
-          </Alert>
-        )}
       </div>
     </SectionCard>
   );

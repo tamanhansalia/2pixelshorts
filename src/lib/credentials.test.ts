@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { createCredentialStore, EMPTY_API_KEYS, type ApiKeys, type CredentialProvider } from "./credentials.ts";
+import { createCredentialStore, singleFlight, EMPTY_API_KEYS, type ApiKeys, type CredentialProvider } from "./credentials.ts";
 import { API_KEY_ZERNIO } from "./appReset.ts";
 
 function fixture(initial: Partial<ApiKeys> = {}, legacy = "") {
@@ -59,5 +59,33 @@ describe("secure credential migration", () => {
     await f.store.clear();
     assert.deepEqual(f.keys, EMPTY_API_KEYS);
     assert.equal(f.storage.size, 0);
+  });
+});
+
+describe("single keychain read per session", () => {
+  it("shares one pending read between concurrent callers", async () => {
+    let calls = 0;
+    const once = singleFlight(async () => { calls += 1; return { ...EMPTY_API_KEYS }; });
+    await Promise.all([once.get(), once.get()]);
+    assert.equal(calls, 1);
+  });
+  it("retries after a denied read instead of caching the failure", async () => {
+    let calls = 0;
+    const once = singleFlight(async () => {
+      calls += 1;
+      if (calls === 1) throw new Error("denied");
+      return { ...EMPTY_API_KEYS };
+    });
+    await assert.rejects(() => once.get(), /denied/);
+    await once.get();
+    assert.equal(calls, 2);
+  });
+  it("reads again after reset so a saved key is never stale", async () => {
+    let calls = 0;
+    const once = singleFlight(async () => { calls += 1; return { ...EMPTY_API_KEYS }; });
+    await once.get();
+    once.reset();
+    await once.get();
+    assert.equal(calls, 2);
   });
 });

@@ -1,4 +1,5 @@
 """Security and evidence isolation regressions for the real pipeline."""
+from pathlib import Path
 import json
 import os
 import sys
@@ -33,7 +34,7 @@ class SecurityWorkflowTests(unittest.TestCase):
             with open(source, "wb") as handle:
                 handle.write(b"fixture")
             args = short_pipeline.build_parser().parse_args(["--input", source, "--output", output, "--agent", "auto", "--duration", "0", "--subtitles", "none"])
-            with patch.object(short_pipeline, "transcribe_isolated", return_value=1), patch.object(short_pipeline.render_mod, "probe_media", return_value={"duration": 3600}), patch.object(short_pipeline.render_mod, "render_short") as render_short:
+            with patch.object(short_pipeline, "transcribe_isolated", return_value=1), patch.object(short_pipeline.render_mod, "probe_media", return_value={"duration": 3600}), patch.object(short_pipeline.render_mod, "render_short", side_effect=lambda _source, output, *args, **kwargs: Path(output).write_bytes(b"encoded")) as render_short:
                 self.assertEqual(short_pipeline.run_render(args), 0)
             self.assertEqual(render_short.call_args.kwargs["cut_duration"], 30.0)
             with open(output + ".edl.json") as handle:
@@ -80,7 +81,7 @@ class SecurityWorkflowTests(unittest.TestCase):
                 with open(words_path, "w") as handle:
                     json.dump({"model": "fixture", "words": [{"word": os.path.basename(words_path), "start": 0, "end": .5}]}, handle)
                 return 0
-            with patch.object(short_pipeline, "transcribe_isolated", side_effect=transcript), patch.object(short_pipeline.render_mod, "probe_media", return_value={"duration": 5}), patch.object(short_pipeline.render_mod, "render_short"):
+            with patch.object(short_pipeline, "transcribe_isolated", side_effect=transcript), patch.object(short_pipeline.render_mod, "probe_media", return_value={"duration": 5}), patch.object(short_pipeline.render_mod, "render_short", side_effect=lambda _source, output, *args, **kwargs: Path(output).write_bytes(b"encoded")):
                 for name in ("first.mp4", "second.mp4"):
                     output = os.path.join(directory, name)
                     args = short_pipeline.build_parser().parse_args(["--input", source, "--output", output, "--agent", "auto", "--duration", "2"])

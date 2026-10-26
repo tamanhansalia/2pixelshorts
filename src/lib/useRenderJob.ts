@@ -11,6 +11,7 @@ import type {
   CommandOutput,
   JobStatus,
   RenderJobProgress,
+  RenderJobInfo,
   RenderShortParams,
 } from "../types/index.ts";
 
@@ -18,6 +19,8 @@ const MAX_LOG_LINES = 200;
 
 export interface RenderJobState {
   jobId: string | null;
+  inputVideo: string | null;
+  outputVideo: string | null;
   status: JobStatus | "idle";
   progress: number;
   stage: string;
@@ -34,6 +37,8 @@ export interface RenderJobState {
 
 const IDLE_STATE = {
   jobId: null as string | null,
+  inputVideo: null as string | null,
+  outputVideo: null as string | null,
   status: "idle" as JobStatus | "idle",
   progress: 0,
   stage: "",
@@ -44,21 +49,20 @@ const IDLE_STATE = {
 
 /**
  * Drives one background render job: subscribes to Tauri progress/finished
- * events (or the browser simulation), exposes determinate progress plus a
+ * events, exposes determinate progress plus a
  * capped live log, and supports cancellation.
  */
 export function useRenderJob(onFinished?: (s: {
   status: JobStatus;
   result: CommandOutput | null;
   error: string | null;
+  inputVideo: string;
+  outputVideo: string;
 }) => void): RenderJobState {
   const [state, setState] = useState(IDLE_STATE);
   const jobIdRef = useRef<string | null>(null);
   const onFinishedRef = useRef(onFinished);
-  const finishedHandlerRef = useRef<((info: {
-    id: string; status: JobStatus; result: CommandOutput | null;
-    error: string | null; progress: number; stage: string;
-  }) => void) | null>(null);
+  const finishedHandlerRef = useRef<((info: RenderJobInfo) => void) | null>(null);
   onFinishedRef.current = onFinished;
 
   useEffect(() => {
@@ -73,18 +77,13 @@ export function useRenderJob(onFinished?: (s: {
       });
     };
 
-    const handleFinished = (info: {
-      id: string;
-      status: JobStatus;
-      result: CommandOutput | null;
-      error: string | null;
-      progress: number;
-      stage: string;
-    }) => {
+    const handleFinished = (info: RenderJobInfo) => {
       if (disposed || info.id !== jobIdRef.current) return;
       jobIdRef.current = null;
       setState((prev) => ({
         ...prev,
+        inputVideo: info.input_video,
+        outputVideo: info.output_video,
         status: info.status,
         progress: info.status === "completed" ? 1 : prev.progress,
         result: info.result,
@@ -94,6 +93,8 @@ export function useRenderJob(onFinished?: (s: {
         status: info.status,
         result: info.result,
         error: info.error,
+        inputVideo: info.input_video,
+        outputVideo: info.output_video,
       });
     };
 
@@ -126,11 +127,21 @@ export function useRenderJob(onFinished?: (s: {
         // Previous job already gone; continue with the new one.
       }
     }
-    const id = await startRenderJob(params);
+    setState({ ...IDLE_STATE, inputVideo: params.input_video, outputVideo: params.output_video,
+      status: "queued", stage: "Starting" });
+    let id: string;
+    try { id = await startRenderJob(params); }
+    catch (error) {
+      setState({ ...IDLE_STATE, inputVideo: params.input_video, outputVideo: params.output_video,
+        status: "failed", error: error instanceof Error ? error.message : String(error) });
+      throw error;
+    }
     jobIdRef.current = id;
     setState({
       ...IDLE_STATE,
       jobId: id,
+      inputVideo: params.input_video,
+      outputVideo: params.output_video,
       status: "queued",
       stage: "Queued",
       logLines: [],
@@ -150,6 +161,8 @@ export function useRenderJob(onFinished?: (s: {
       setState((prev) => ({
         ...prev,
         jobId,
+        inputVideo: info.input_video,
+        outputVideo: info.output_video,
         status: info.status,
         progress: info.progress,
         stage: info.stage,

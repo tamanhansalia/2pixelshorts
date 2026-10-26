@@ -12,6 +12,7 @@
 use crate::models::{CommandOutput, JobInfo, JobProgressEvent, JobStatus};
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -27,6 +28,7 @@ pub struct RenderRequest {
     pub output_video: String,
     pub preset_id: String,
     pub agent_id: Option<String>,
+    pub model_id: Option<String>,
     pub subtitle_style: Option<String>,
     pub subtitle_position: Option<String>,
     pub subtitle_size: Option<String>,
@@ -36,6 +38,7 @@ pub struct RenderRequest {
     pub cut_end: Option<f64>,
     pub prompt_hook: Option<String>,
     pub elevenlabs_key: Option<String>,
+    pub transcription_provider: Option<String>,
     pub channel_context: Option<String>,
     pub meta_title: Option<String>,
     pub meta_desc: Option<String>,
@@ -43,10 +46,38 @@ pub struct RenderRequest {
     pub aspect_ratio: Option<String>,
     pub layout: Option<String>,
     pub face_roi: Option<String>,
+    pub edit_plan: Option<serde_json::Value>,
+    pub edit_strategy: Option<String>,
+    pub remove_silence: Option<bool>,
+    pub remove_retakes: Option<bool>,
 }
 
 impl RenderRequest {
     pub fn validate(&self) -> Result<(), String> {
+        crate::transcription::helper_args(self.transcription_provider.as_deref(), self.elevenlabs_key.as_deref(), true)?;
+        if let Some(strategy) = &self.edit_strategy {
+            if !["cleanup", "highlights", "full"].contains(&strategy.as_str()) {
+                return Err("Choose a supported editing mode".into());
+            }
+            if self.edit_plan.is_some() || self.cut_start.is_some() || self.cut_end.is_some() {
+                return Err("Automatic editing cannot be combined with manual edits".into());
+            }
+            if strategy == "highlights" {
+                if self.agent_id.as_deref().is_none_or(|a| ["", "auto", "none", "off"].contains(&a)) {
+                    return Err("Choose an editing model for AI highlights".into());
+                }
+                if self.target_duration.is_none_or(|d| !d.is_finite() || d <= 0.) {
+                    return Err("Choose a positive highlight duration".into());
+                }
+            }
+        }
+        if self.prompt_hook.as_ref().is_some_and(|p| !p.trim().is_empty())
+            && self.agent_id.as_deref().is_none_or(|a| ["", "auto", "none", "off"].contains(&a)) {
+            return Err("Choose an editing CLI to apply custom instructions".into());
+        }
+        if self.model_id.as_ref().is_some_and(|model| model.chars().count() > 200 || model.chars().any(char::is_control)) {
+            return Err("Enter a model ID of at most 200 characters without control characters".into());
+        }
         let input = std::path::Path::new(&self.input_video);
         let output = std::path::Path::new(&self.output_video);
         if !input.is_file() { return Err("Source video does not exist or is not a file".into()); }
@@ -67,7 +98,32 @@ impl RenderRequest {
         if self.prompt_hook.as_ref().is_some_and(|prompt| prompt.chars().count() > 4000) {
             return Err("Keep the custom prompt within 4,000 characters".into());
         }
+        if let Some(plan) = &self.edit_plan {
+            if !plan.is_object() || plan.get("version").and_then(|v| v.as_u64()) != Some(1) {
+                return Err("Invalid transcript edit".into());
+            }
+            if self.prompt_hook.as_ref().is_some_and(|p| !p.trim().is_empty()) {
+                return Err("Choose either your transcript edit or AI shortening".into());
+            }
+            if self.cut_start.is_some() || self.cut_end.is_some() {
+                return Err("Choose either transcript lines or a manual time trim".into());
+            }
+        }
         Ok(())
+    }
+    /// Large transcripts travel in a private file rather than command-line
+    /// arguments. The owner keeps it alive through the worker and cancellation.
+    pub fn prepare_pipeline_args(&self, script: &str) -> Result<(Vec<String>, Option<tempfile::NamedTempFile>), String> {
+        let mut args = self.to_pipeline_args(script);
+        let plan_file = if let Some(plan) = &self.edit_plan {
+            let mut file = tempfile::Builder::new().prefix("pixel_edit_").suffix(".json").tempfile()
+                .map_err(|e| format!("Could not prepare transcript edit: {}", e))?;
+            serde_json::to_writer(file.as_file_mut(), plan)
+                .map_err(|e| format!("Could not save transcript edit: {}", e))?;
+            args.extend(["--edit-plan".into(), file.path().to_string_lossy().into_owned()]);
+            Some(file)
+        } else { None };
+        Ok((args, plan_file))
     }
     /// Build the `short_pipeline.py` CLI args. Empty/blank optionals are
     /// skipped, mirroring the blocking `render_short` behavior exactly.
@@ -82,7 +138,11 @@ impl RenderRequest {
             self.preset_id.clone(),
         ];
 
+        push_opt(&mut args, "--edit-strategy", &self.edit_strategy);
+        if self.remove_silence == Some(false) { args.push("--keep-silence".into()); }
+        if self.remove_retakes == Some(false) { args.push("--keep-retakes".into()); }
         push_opt(&mut args, "--agent", &self.agent_id);
+        push_opt(&mut args, "--model", &self.model_id);
         push_opt(&mut args, "--subtitles", &self.subtitle_style);
         push_opt(
             &mut args,
@@ -92,8 +152,8 @@ impl RenderRequest {
         push_opt(&mut args, "--subtitle-size", &self.subtitle_size);
         push_opt(&mut args, "--subtitle-case", &self.subtitle_case);
 
-        // NOTE: duration is passed even when 0 (VideoStudio sends 0 for
-        // "auto"); the pipeline treats 0 as "no trim". Same as render_short.
+        // AI/automatic edits use the pipeline's budget. Explicit transcript
+        // edits preserve their selected ranges regardless of this value.
         if let Some(dur) = self.target_duration {
             args.push("--duration".to_string());
             args.push(dur.to_string());
@@ -108,7 +168,10 @@ impl RenderRequest {
         }
 
         push_opt(&mut args, "--prompt", &self.prompt_hook);
-        push_opt(&mut args, "--elevenlabs-key", &self.elevenlabs_key);
+        args.extend(["--engine".to_string(), self.transcription_provider.clone().unwrap_or_else(|| "local".into())]);
+        if self.transcription_provider.as_deref() == Some("elevenlabs") {
+            push_opt(&mut args, "--elevenlabs-key", &self.elevenlabs_key);
+        }
         push_opt(&mut args, "--channel-context", &self.channel_context);
         push_opt(&mut args, "--meta-title", &self.meta_title);
         push_opt(&mut args, "--meta-desc", &self.meta_desc);
@@ -266,6 +329,46 @@ pub fn resolve_python() -> String {
     {
         "python3".to_string()
     }
+}
+
+/// Folder for YouTube/Twitch clip windows when Studio has no local file yet.
+pub fn stream_clip_dir(home: &Path) -> PathBuf {
+    home.join(".2pixelshorts").join("clips")
+}
+
+/// Make a clip download path absolute and create its parent folder.
+///
+/// Relative names (YouTube-only studio) land in `~/.2pixelshorts/clips`.
+/// Absolute paths next to an existing source file are kept.
+pub fn resolve_stream_clip_output(output: &str) -> Result<String, String> {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .ok_or_else(|| "Cannot resolve the clip download folder".to_string())?;
+    resolve_stream_clip_output_in(output, &home)
+}
+
+pub fn resolve_stream_clip_output_in(output: &str, home: &Path) -> Result<String, String> {
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        return Err("Clip output path is empty".into());
+    }
+    let path = PathBuf::from(trimmed);
+    let resolved = if path.is_absolute() {
+        path
+    } else {
+        let name = path
+            .file_name()
+            .ok_or_else(|| "Clip output needs a file name".to_string())?;
+        stream_clip_dir(home).join(name)
+    };
+    if let Some(parent) = resolved.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Cannot create clip folder: {e}"))?;
+        }
+    }
+    Ok(resolved.to_string_lossy().into_owned())
 }
 
 /// Parse a pipeline stdout line into a 0.0–1.0 progress value.
@@ -543,6 +646,7 @@ mod tests {
             output_video: "out.mp4".to_string(),
             preset_id: "warm_cinematic".to_string(),
             agent_id: Some("claude".to_string()),
+            model_id: None,
             subtitle_style: Some("  ".to_string()),
             subtitle_position: None,
             subtitle_size: None,
@@ -552,6 +656,7 @@ mod tests {
             cut_end: None,
             prompt_hook: None,
             elevenlabs_key: Some(String::new()),
+            transcription_provider: Some("local".into()),
             channel_context: None,
             meta_title: Some("Title".to_string()),
             meta_desc: None,
@@ -559,15 +664,37 @@ mod tests {
             aspect_ratio: None,
             layout: None,
             face_roi: None,
+            edit_plan: None,
+            edit_strategy: None,
+            remove_silence: None,
+            remove_retakes: None,
         };
         let args = req.to_pipeline_args("short_pipeline.py");
-        // script + 3 required pairs = 7, agent pair = 2, duration pair = 2, title pair = 2
-        assert_eq!(args.len(), 13);
+        // Required fields + explicit engine, agent, duration and title pairs.
+        assert_eq!(args.len(), 15);
         assert!(args.contains(&"--agent".to_string()));
         assert!(!args.contains(&"--subtitles".to_string()));
         assert!(!args.contains(&"--elevenlabs-key".to_string()));
         let dur_pos = args.iter().position(|a| a == "--duration").unwrap();
         assert_eq!(args[dur_pos + 1], "0");
+    }
+
+    #[test]
+    fn render_transcription_uses_the_explicit_provider() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("in.mp4");
+        std::fs::write(&source, b"fixture").unwrap();
+        for provider in [None, Some("local"), Some("elevenlabs")] {
+            let req: RenderRequest = serde_json::from_value(serde_json::json!({
+                "input_video": source, "output_video": directory.path().join("out.mp4"), "preset_id": "vertical_clean",
+                "transcription_provider": provider, "elevenlabs_key": "test-key"
+            })).unwrap();
+            req.validate().unwrap();
+            let args = req.to_pipeline_args("short_pipeline.py");
+            let engine = args.iter().position(|arg| arg == "--engine").unwrap();
+            assert_eq!(args[engine + 1], provider.unwrap_or("local"));
+            assert_eq!(args.contains(&"--elevenlabs-key".into()), provider == Some("elevenlabs"));
+        }
     }
 
     #[test]
@@ -585,12 +712,37 @@ mod tests {
     }
 
     #[test]
+    fn optional_prompt_and_model_combine_with_each_editing_mode() {
+        let source = tempfile::NamedTempFile::new().unwrap();
+        for strategy in ["cleanup", "highlights", "full"] {
+            let mut req: RenderRequest = serde_json::from_value(serde_json::json!({
+                "input_video": source.path().to_str().unwrap(), "output_video": "optional-edit.mp4",
+                "preset_id": "warm_cinematic", "agent_id": "codex", "model_id": "chosen-model",
+                "edit_strategy": strategy, "target_duration": 60,
+                "prompt_hook": "Use https://youtu.be/abcdefghijk for pacing. Keep the conclusion."
+            })).unwrap();
+            assert!(req.validate().is_ok());
+            let args = req.to_pipeline_args("short_pipeline.py");
+            let model = args.iter().position(|arg| arg == "--model").unwrap();
+            assert_eq!(args[model + 1], "chosen-model");
+            let mode = args.iter().position(|arg| arg == "--edit-strategy").unwrap();
+            assert_eq!(args[mode + 1], strategy);
+            req.agent_id = Some("auto".into());
+            assert!(req.validate().is_err());
+            req.agent_id = Some("codex".into());
+            req.model_id = Some("invalid\nmodel".into());
+            assert!(req.validate().is_err());
+        }
+    }
+
+    #[test]
     fn pipeline_args_include_manual_trim() {
         let mut req = RenderRequest {
             input_video: "in.mp4".to_string(),
             output_video: "out.mp4".to_string(),
             preset_id: "p".to_string(),
             agent_id: None,
+            model_id: None,
             subtitle_style: None,
             subtitle_position: None,
             subtitle_size: None,
@@ -600,6 +752,7 @@ mod tests {
             cut_end: Some(9.0),
             prompt_hook: None,
             elevenlabs_key: None,
+            transcription_provider: Some("local".into()),
             channel_context: None,
             meta_title: None,
             meta_desc: None,
@@ -607,6 +760,10 @@ mod tests {
             aspect_ratio: None,
             layout: None,
             face_roi: None,
+            edit_plan: None,
+            edit_strategy: None,
+            remove_silence: None,
+            remove_retakes: None,
         };
         let args = req.to_pipeline_args("s.py");
         let joined = args.join(" ");
@@ -627,6 +784,7 @@ mod tests {
             output_video: "out.mp4".to_string(),
             preset_id: "p".to_string(),
             agent_id: None,
+            model_id: None,
             subtitle_style: None,
             subtitle_position: None,
             subtitle_size: None,
@@ -636,6 +794,7 @@ mod tests {
             cut_end: None,
             prompt_hook: None,
             elevenlabs_key: None,
+            transcription_provider: Some("local".into()),
             channel_context: None,
             meta_title: None,
             meta_desc: None,
@@ -643,6 +802,10 @@ mod tests {
             aspect_ratio: None,
             layout: Some("screen-top".to_string()),
             face_roi: Some("auto".to_string()),
+            edit_plan: None,
+            edit_strategy: None,
+            remove_silence: None,
+            remove_retakes: None,
         };
         let joined = req.to_pipeline_args("s.py").join(" ");
         assert!(joined.contains("--layout screen-top"), "{}", joined);
@@ -656,6 +819,7 @@ mod tests {
             output_video: "out.mp4".to_string(),
             preset_id: "p".to_string(),
             agent_id: None,
+            model_id: None,
             subtitle_style: None,
             subtitle_position: None,
             subtitle_size: None,
@@ -665,6 +829,7 @@ mod tests {
             cut_end: None,
             prompt_hook: None,
             elevenlabs_key: None,
+            transcription_provider: Some("local".into()),
             channel_context: None,
             meta_title: None,
             meta_desc: None,
@@ -672,6 +837,10 @@ mod tests {
             aspect_ratio: Some("1:1".to_string()),
             layout: Some("single".to_string()),
             face_roi: None,
+            edit_plan: None,
+            edit_strategy: None,
+            remove_silence: None,
+            remove_retakes: None,
         };
         let joined = req.to_pipeline_args("s.py").join(" ");
         assert!(joined.contains("--aspect-ratio 1:1"), "{}", joined);
@@ -685,6 +854,7 @@ mod tests {
             output_video: "out.mp4".to_string(),
             preset_id: "p".to_string(),
             agent_id: None,
+            model_id: None,
             subtitle_style: None,
             subtitle_position: None,
             subtitle_size: None,
@@ -694,6 +864,7 @@ mod tests {
             cut_end: None,
             prompt_hook: None,
             elevenlabs_key: None,
+            transcription_provider: Some("local".into()),
             channel_context: None,
             meta_title: None,
             meta_desc: None,
@@ -701,6 +872,10 @@ mod tests {
             aspect_ratio: None,
             layout: None,
             face_roi: None,
+            edit_plan: None,
+            edit_strategy: None,
+            remove_silence: None,
+            remove_retakes: None,
         };
         let id = create_render_job(&reg, &req);
         assert_eq!(reg.get(&id).unwrap().status, JobStatus::Queued);
@@ -779,5 +954,28 @@ mod tests {
         assert!(python == "python" || python.ends_with("python.exe"));
         #[cfg(not(target_os = "windows"))]
         assert!(python == "python3" || python.ends_with("video-use/.venv/bin/python"));
+    }
+
+    #[test]
+    fn relative_clip_output_lands_in_app_clips_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = resolve_stream_clip_output_in("Talk_clip1.mp4", tmp.path()).unwrap();
+        let expected = stream_clip_dir(tmp.path()).join("Talk_clip1.mp4");
+        assert_eq!(Path::new(&out), expected.as_path());
+        assert!(expected.parent().unwrap().is_dir());
+    }
+
+    #[test]
+    fn absolute_clip_output_is_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("kept.mp4");
+        let out = resolve_stream_clip_output_in(dest.to_str().unwrap(), tmp.path()).unwrap();
+        assert_eq!(Path::new(&out), dest.as_path());
+    }
+
+    #[test]
+    fn empty_clip_output_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(resolve_stream_clip_output_in("  ", tmp.path()).is_err());
     }
 }

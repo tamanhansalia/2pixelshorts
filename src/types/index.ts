@@ -66,6 +66,12 @@ export interface SocialPublishPayload {
   media_url?: string;
   /** Queue entry id, sent as `Idempotency-Key` so gateway retries are safe. */
   idempotency_key?: string;
+  /** Postable hashtags for captions (preferred over tags-as-hashtags). */
+  hashtags?: string[];
+  /** YouTube pinned first comment. */
+  first_comment?: string;
+  /** YouTube category id, e.g. "28" Science & Technology. */
+  youtube_category?: string;
 }
 
 export interface VideoReviewReport {
@@ -100,6 +106,17 @@ export interface SeoMetadata {
   quality_score?: number | null;
   quality_checks?: SeoQualityCheck[];
   keywords_analyzed?: string[];
+  /** The 3 searches this short should win (lowercase phrases). */
+  search_queries?: string[];
+  /**
+   * Subset of search_queries that came from outside the transcript
+   * (autocomplete, trends, or the agent). Empty means the package's
+   * phrases were composed from speech and must not raise the score.
+   * Omitted on packages written before this field existed.
+   */
+  demand_queries?: string[];
+  /** Suggested pinned first comment (YouTube). */
+  pinned_comment?: string;
   review_report?: VideoReviewReport;
 }
 
@@ -108,6 +125,7 @@ export interface RenderShortParams {
   output_video: string;
   preset_id: string;
   agent_id?: string;
+  model_id?: string;
   subtitle_style?: string;
   subtitle_position?: "bottom" | "center" | "top" | string;
   subtitle_size?: "compact" | "standard" | "large" | string;
@@ -118,6 +136,7 @@ export interface RenderShortParams {
   cut_end?: number;
   prompt_hook?: string;
   elevenlabs_key?: string;
+  transcription_provider?: "local" | "elevenlabs";
   channel_context?: string;
   meta_title?: string;
   meta_desc?: string;
@@ -127,6 +146,29 @@ export interface RenderShortParams {
   layout?: string;
   /** Always "auto": the engine detects the face itself. */
   face_roi?: string;
+  edit_plan?: TranscriptEditPlan;
+  edit_strategy?: "cleanup" | "highlights" | "full";
+  remove_silence?: boolean;
+  remove_retakes?: boolean;
+}
+
+export interface TranscriptWord { word: string; start: number; end: number }
+export interface SourceTranscript {
+  source_path: string;
+  source_duration: number;
+  words: TranscriptWord[];
+  engine: string;
+  suggested_segments?: { start: number; end: number }[];
+  edit_method?: string;
+  removals?: { start: number; end: number; reason: string; later_start?: number }[];
+}
+export interface TranscriptEditPlan {
+  version: 1;
+  source_path: string;
+  source_duration: number;
+  segments: { start: number; end: number }[];
+  /** null asks the renderer to transcribe; [] intentionally has no captions. */
+  words: TranscriptWord[] | null;
 }
 
 export interface ScheduleItem {
@@ -143,6 +185,8 @@ export interface ScheduleItem {
   /** Full payload kept for re-dispatch from the queue (Post now). */
   description?: string;
   tags?: string[];
+  hashtags?: string[];
+  first_comment?: string;
   account_ids?: string[];
   /** Last dispatch error, shown on the row. */
   error?: string | null;
@@ -158,7 +202,7 @@ export type GlobalTaskStatus =
 
 export type JobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 
-/** Which transcription engine `auto` would use (see probe_transcription). */
+/** Readiness of the selected transcription provider (see probe_transcription). */
 export interface TranscriptionStatus {
   elevenlabs_key_configured: boolean;
   local_available: boolean;
@@ -206,12 +250,16 @@ export interface TrendingKeyword {
 export interface TrendingVideo {
   title: string;
   channel: string;
+  views?: number | null;
+  views_per_hour?: number | null;
 }
 
 export interface TrendingResult {
   niche: string;
   keywords: TrendingKeyword[];
   videos: TrendingVideo[];
+  /** Free YouTube autocomplete phrases for the niche. */
+  queries?: string[];
   fetched_at: string | null;
   cached: boolean;
   note?: string;

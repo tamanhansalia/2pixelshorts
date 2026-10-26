@@ -1,4 +1,5 @@
 """Custom prompts must reach planning with real references or fail explicitly."""
+from pathlib import Path
 
 import contextlib
 import io
@@ -94,8 +95,8 @@ class StrictPromptTests(unittest.TestCase):
             with patch.object(short_pipeline.render_mod, "probe_media", return_value={"duration": 20}), \
                     patch.object(short_pipeline, "transcribe_isolated", side_effect=transcribe), \
                     patch.object(agent_edit, "run_agent_cut", side_effect=agent_error) as planner, \
-                    patch.object(short_pipeline.render_mod, "render_short") as head, \
-                    patch.object(short_pipeline.render_mod, "render_edl") as render_edl, \
+                    patch.object(short_pipeline.render_mod, "render_short", side_effect=lambda _source, output, *args, **kwargs: Path(output).write_bytes(b"encoded")) as head, \
+                    patch.object(short_pipeline.render_mod, "render_edl", side_effect=lambda _source, output, *args, **kwargs: Path(output).write_bytes(b"encoded")) as render_edl, \
                     contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
                 rc = short_pipeline.run_render(args)
             return rc, err.getvalue(), head.called, render_edl.called, planner.called
