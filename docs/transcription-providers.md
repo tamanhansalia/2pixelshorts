@@ -26,10 +26,11 @@ its existing transcript shape, local model support, rendering and caption style.
 1. **Save one explicit provider preference.** Settings → Engine shows Local
    Whisper and ElevenLabs API. Default to Local; persist the choice separately
    from credentials and clear it during a complete app-data reset.
-2. **Route every transcription request.** Both render entry points, source
-   transcript extraction, video/SEO analysis and YouTube audio fallback pass an
-   explicit engine through TypeScript IPC, Rust and Python. Existing YouTube
-   captions remain a free first source for link analysis.
+2. **Route every transcription request.** Render, source-transcript
+   extraction, and video/SEO analysis of a local file pass the explicit
+   engine through TypeScript IPC, Rust, and Python. A YouTube or Twitch link
+   uses published captions first. When the platform did not publish captions,
+   clip finding transcribes the replay locally and does not call ElevenLabs.
 3. **Integrate Scribe audio uploads.** Keep API keys in the existing OS vault,
    send them to workers through environment variables, extract mono FLAC audio,
    spool multipart data to disk and upload using the upstream Scribe fields.
@@ -51,6 +52,8 @@ its existing transcript shape, local model support, rendering and caption style.
   key test uses account access; restricted keys can be saved without that test.
 - A provider error cannot become a successful export with missing captions.
 - YouTube caption retrieval does not consume transcription API credits.
+- A replay with no published captions is transcribed locally. Clip finding
+  does not upload that replay to ElevenLabs, even when Settings selects it.
 - Word timestamps retain their source-video timeline in both providers.
 - Local long-form transcription retains the existing bounded five-minute windows.
 - Upload tests verify headers, content length, FLAC content and upstream fields;

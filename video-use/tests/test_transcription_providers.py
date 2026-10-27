@@ -68,12 +68,12 @@ class ProviderTests(unittest.TestCase):
             self.assertEqual(stream_clip.fetch_transcript_words("url", "elevenlabs", ""), (WORDS, "youtube-captions"))
         audio.assert_not_called()
 
-    def test_caption_failure_routes_audio_to_the_selected_cloud_provider(self):
+    def test_caption_failure_stays_local_even_when_elevenlabs_is_selected(self):
         with patch.object(stream_clip, "fetch_caption_words", side_effect=stream_clip.StreamClipError("no captions")), \
-                patch.object(stream_clip, "transcribe_url_words", return_value=(WORDS, "elevenlabs:scribe_v1")) as audio:
+                patch.object(stream_clip, "transcribe_url_words", return_value=(WORDS, "local-whisper")) as audio:
             self.assertEqual(stream_clip.fetch_transcript_words("url", "elevenlabs", "key"),
-                             (WORDS, "elevenlabs:scribe_v1"))
-        audio.assert_called_once_with("url", engine="elevenlabs", api_key="key")
+                             (WORDS, "local-whisper"))
+        audio.assert_called_once_with("url")
 
     def test_youtube_cloud_path_does_not_require_or_invoke_local_whisper(self):
         def download(cmd, timeout):

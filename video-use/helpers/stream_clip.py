@@ -10,7 +10,11 @@ min-gap merge and a ``--max-clips`` safety cap.
 Transcript source order (first win):
 1. Explicit ``--words words.json`` (a transcript produced by ``transcribe.py``).
 2. YouTube/Twitch captions via ``yt-dlp`` (free, timestamped, fast).
-3. Download audio and transcribe with the selected provider when captions are unavailable.
+3. Download audio and transcribe it locally when the platform did not publish captions.
+
+A full replay is never sent to ElevenLabs. That provider is for short local
+footage. A live replay is hours long, and a missing caption track must not
+spend account credits.
 
 Stdlib only; ``yt-dlp`` and ``ffmpeg`` are shelled out to (never imported).
 """
@@ -401,15 +405,21 @@ def transcribe_url_words(url, timeout=3600, engine="local", api_key=""):
 
 
 def fetch_transcript_words(url, engine="local", api_key=""):
-    """Prefer captions; a caption failure must not block audio-based analysis."""
+    """Prefer published captions, then listen locally.
+
+    ``engine`` and ``api_key`` stay in the signature because the clip command
+    still receives the Settings provider. They are not used here. ElevenLabs
+    is for a short file the user dropped. A replay with no YouTube or Twitch
+    captions is transcribed on this computer, including when Settings is
+    ElevenLabs and that account is out of credits.
+    """
+    del engine, api_key
     try:
         return fetch_caption_words(url)
     except StreamClipError as exc:
         if LIVE_REFUSAL in str(exc):
             raise
-        if engine == "local":
-            return transcribe_url_words(url)
-        return transcribe_url_words(url, engine=engine, api_key=api_key)
+        return transcribe_url_words(url)
 
 
 def _word_start(item):
