@@ -159,9 +159,51 @@ describe("studio projects", () => {
     ], "2026-10-20T12:00:00.000Z");
     assert.deepEqual(next.recent, ["/clips/a_clip1.mp4", "/clips/a_clip2.mp4"]);
     assert.equal(next.currentId, "/clips/a_clip1.mp4");
-    assert.equal(next.projects["/clips/a_clip1.mp4"].seoTitle, "Technical breakdown");
-    assert.equal(next.projects["/clips/a_clip1.mp4"].studioStage, "edit");
-    assert.equal(next.projects["/clips/a_clip2.mp4"].studioStage, "source");
+    const opened = next.projects["/clips/a_clip1.mp4"];
+    assert.equal(opened.seoTitle, "Technical breakdown");
+    assert.equal(opened.studioStage, "captions");
+    assert.equal(opened.editStrategy, "full");
+    assert.equal(opened.removeSilence, false);
+    assert.equal(opened.removeRetakes, false);
+    assert.equal(opened.burnInCaptions, true);
+    assert.equal(opened.preparedClip, true);
+    assert.equal(opened.promptHook, "");
+    const waiting = next.projects["/clips/a_clip2.mp4"];
+    assert.equal(waiting.studioStage, "source");
+    assert.equal(waiting.editStrategy, "full");
+    assert.equal(waiting.preparedClip, true);
+    assert.equal(waiting.removeSilence, false);
+    assert.equal(waiting.removeRetakes, false);
+    const normalized = normalizeStudioStore(next).projects["/clips/a_clip1.mp4"];
+    assert.equal(normalized.studioStage, "captions");
+    assert.equal(normalized.editStrategy, "full");
+    assert.equal(normalized.removeSilence, false);
+    assert.equal(normalized.removeRetakes, false);
+    const missingFlags = normalizeStudioStore({
+      ...next,
+      projects: {
+        ...next.projects,
+        "/clips/a_clip1.mp4": {
+          ...opened,
+          editStrategy: undefined,
+          removeSilence: undefined,
+          removeRetakes: undefined,
+        },
+      },
+    }).projects["/clips/a_clip1.mp4"];
+    assert.equal(missingFlags.editStrategy, "full");
+    assert.equal(missingFlags.removeSilence, false);
+    assert.equal(missingFlags.removeRetakes, false);
+    const chosenCleanup = normalizeStudioStore({
+      ...next,
+      projects: {
+        ...next.projects,
+        "/clips/a_clip1.mp4": { ...opened, editStrategy: "cleanup", removeSilence: true },
+      },
+    }).projects["/clips/a_clip1.mp4"];
+    assert.equal(chosenCleanup.editStrategy, "cleanup");
+    assert.equal(chosenCleanup.removeSilence, true);
+    assert.equal(chosenCleanup.preparedClip, true);
     const untouched = emptyStudioStore();
     assert.equal(importClipDrafts(untouched, []), untouched);
   });
@@ -194,6 +236,10 @@ describe("studio projects", () => {
     assert.equal(d.reviewReport, null);
     assert.equal("activeStep" in d, false);
     assert.equal(d.burnInCaptions, true);
+    assert.equal(d.editStrategy, "cleanup");
+    assert.equal(d.removeSilence, true);
+    assert.equal(d.removeRetakes, true);
+    assert.notEqual(d.preparedClip, true);
   });
 
   it("prefills a draft from a queue item without a step", () => {

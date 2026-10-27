@@ -48,6 +48,12 @@ export interface StudioProjectDraft {
   seoScore?: number | null;
   seoQualityScore?: number | null;
   seoKeywords?: string[];
+  /**
+   * True when this file is a window from Find clips. It is already a short:
+   * the default export keeps every frame and burns captions, framing, and grade.
+   * A file the user dropped stays false and keeps the normal edit modes.
+   */
+  preparedClip?: boolean;
   /** The searches this short should win, and its pinned first comment. */
   seoSearchQueries?: string[];
   /**
@@ -194,10 +200,37 @@ export interface ImportedClipSource {
   title?: string;
 }
 
+/** Edit defaults for a window Find clips already cut.
+ *
+ * Keep the whole file. Skip pause removal, retake removal, and the
+ * highlight cutter. Captions, framing, and grade still burn on export.
+ */
+export function preparedClipFields(): {
+  editStrategy: "full";
+  removeSilence: false;
+  removeRetakes: false;
+  burnInCaptions: true;
+  preparedClip: true;
+  promptHook: "";
+  customInstructionsEnabled: false;
+} {
+  return {
+    editStrategy: "full",
+    removeSilence: false,
+    removeRetakes: false,
+    burnInCaptions: true,
+    preparedClip: true,
+    promptHook: "",
+    customInstructionsEnabled: false,
+  };
+}
+
 /** Insert selected clip downloads as fresh Studio drafts.
  *
  * First clip in `clips` becomes current (opens in Studio). Reverse upsert
- * so the sidebar keeps clip-finder order, most-recent-first. */
+ * so the sidebar keeps clip-finder order, most-recent-first. A probed
+ * window opens on Captions; one still waiting on a probe stays on Video
+ * but already carries the keep-whole edit defaults. */
 export function importClipDrafts(
   store: StudioStore,
   clips: ImportedClipSource[],
@@ -210,10 +243,11 @@ export function importClipDrafts(
     const title = (clip.title || "").trim();
     const draft: StudioProjectDraft = {
       ...blankStudioDraft(),
+      ...preparedClipFields(),
       inputPath: clip.inputPath,
       metadata: clip.metadata,
       seoTitle: title,
-      studioStage: clip.metadata ? "edit" : "source",
+      studioStage: clip.metadata ? "captions" : "source",
       updatedAt: now,
       createdAt: now,
     };
@@ -689,16 +723,22 @@ export function normalizeStudioStore(store: StudioStore): StudioStore {
     // Drafts stored before outputTouched existed keep their saved name:
     // anything beyond the blank default counts as user-chosen.
     const outputPath = draft.outputPath ?? "";
+    const preparedClip = draft.preparedClip === true;
     projects[id] = {
       ...(draft as StudioProjectDraft),
       outputPath,
-      editStrategy: normalizeEditStrategy(draft.editStrategy ?? (draft.promptHook?.trim() ? "custom" : undefined)),
+      preparedClip,
+      editStrategy: normalizeEditStrategy(
+        draft.editStrategy ?? (preparedClip ? "full" : (draft.promptHook?.trim() ? "custom" : undefined)),
+      ),
       promptHook: draft.promptHook ?? "",
       customInstructionsEnabled: draft.customInstructionsEnabled ?? (draft.editStrategy === "custom" || (!draft.editStrategy && Boolean(draft.promptHook?.trim()))),
       modelId: draft.modelId ?? "",
       studioStage: resolveStudioStage(draft.studioStage, Boolean(draft.metadata)),
-      removeSilence: draft.removeSilence ?? true,
-      removeRetakes: draft.removeRetakes ?? true,
+      // A finder window stores false on purpose. Only a missing flag on a
+      // normal recording turns pause and retake removal back on.
+      removeSilence: draft.removeSilence ?? !preparedClip,
+      removeRetakes: draft.removeRetakes ?? !preparedClip,
       highlightTarget: [30, 60, 90].includes(draft.highlightTarget ?? 0) ? draft.highlightTarget : 30,
       outputTouched:
         draft.outputTouched ??

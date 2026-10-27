@@ -22,6 +22,7 @@ import {
   needsNineSixteenCanvas,
   parseAspectRatio,
   reviewModelOption,
+  parseStreamLength,
   streamSuggestOptions,
 } from "./streamClips.ts";
 
@@ -304,7 +305,24 @@ describe("streamSuggestOptions", () => {
     assert.equal(opts.threshold, STREAM_DEFAULTS.threshold);
     assert.equal(opts.minLength, STREAM_LENGTHS.standard.min);
     assert.equal(opts.maxLength, STREAM_LENGTHS.standard.max);
+    assert.equal(opts.length, "standard");
     assert.equal(opts.maxClips, STREAM_DEFAULTS.maxClips);
     assert.equal(opts.minGap, STREAM_DEFAULTS.minGap);
+  });
+
+  it("sends the chosen clip length and keeps an unknown band on Standard", () => {
+    const short = streamSuggestOptions({ length: "short" });
+    assert.equal(short.length, "short");
+    assert.equal(short.minLength, STREAM_LENGTHS.short.min);
+    assert.equal(short.maxLength, STREAM_LENGTHS.short.max);
+    const long = streamSuggestOptions({ length: "long" });
+    assert.equal(long.length, "long");
+    assert.equal(long.minLength, 30);
+    assert.equal(long.maxLength, 60);
+    const unknown = streamSuggestOptions({ length: "tiny" });
+    assert.equal(unknown.length, "standard");
+    assert.equal(unknown.minLength, STREAM_LENGTHS.standard.min);
+    assert.equal(unknown.maxLength, STREAM_LENGTHS.standard.max);
+    assert.equal(parseStreamLength(undefined), "standard");
   });
 });

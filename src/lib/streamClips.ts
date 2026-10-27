@@ -36,6 +36,8 @@ export interface SuggestStreamClipsOptions {
   maxLength?: number;
   maxClips?: number;
   minGap?: number;
+  /** Chosen band. The engine receives `minLength` and `maxLength`. */
+  length?: StreamLengthId;
 }
 
 export interface SuggestStreamClipsResult {
@@ -53,27 +55,35 @@ export interface SuggestStreamClipsResult {
 
 export type StreamWorkflow = "automatic" | "review";
 
-/** Fixed clip-finder settings for the simplified Source step.
+/** Clip-finder settings for one search.
  *
- * Source only collects the footage (file or link); taste choices live in
- * Style. The finder always uses the Standard length band with the default
- * scoring budget — the caller supplies the model (Style's editing model),
- * channel context, and cut instructions. */
+ * The caller supplies the editing model, channel context, and the length
+ * band chosen before Find clips. An unknown band stays on Standard. */
 export function streamSuggestOptions(opts: {
   agentId?: string;
   channelContext?: string;
   promptHook?: string;
+  length?: unknown;
 }): SuggestStreamClipsOptions {
+  const length = parseStreamLength(opts.length);
+  const band = STREAM_LENGTHS[length];
   return {
     agentId: opts.agentId,
     channelContext: opts.channelContext,
     promptHook: opts.promptHook,
     threshold: STREAM_DEFAULTS.threshold,
-    minLength: STREAM_LENGTHS.standard.min,
-    maxLength: STREAM_LENGTHS.standard.max,
+    minLength: band.min,
+    maxLength: band.max,
     maxClips: STREAM_DEFAULTS.maxClips,
     minGap: STREAM_DEFAULTS.minGap,
+    length,
   };
+}
+
+/** Short, Standard, or Long. Anything else, including a missing value, is Standard. */
+export function parseStreamLength(value: unknown): StreamLengthId {
+  if (value === "short" || value === "standard" || value === "long") return value;
+  return "standard";
 }
 
 /** Reviewers offered in the Stream picker. `auto` = heuristic scoring,

@@ -71,6 +71,7 @@ import {
 import {
   STREAM_ASPECT_RATIOS,
   STREAM_LAYOUTS,
+  STREAM_LENGTHS,
   clipWorkPath,
   dirPrefixOf,
   downloadStreamClipsAsSources,
@@ -82,17 +83,20 @@ import {
   isYoutubeUrl,
   needsNineSixteenCanvas,
   parseAspectRatio,
+  parseStreamLength,
   resolvedClipOutput,
   streamSuggestOptions,
   type ImportedClipFile,
   type StreamAspectRatioId,
   type StreamLayoutId,
+  type StreamLengthId,
   type SuggestStreamClipsOptions,
 } from "../../lib/streamClips";
 import type { RenderHistoryEntry } from "../../lib/renderHistory";
 import type { StudioProjectDraft } from "../../lib/studioProjects";
 import {
   latestCompletedOutput,
+  preparedClipFields,
   shouldAutoNameOutput,
   streamClipSourceName,
   suggestOutputPath,
@@ -545,8 +549,9 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
     initialDraft?.agentId ?? "claude",
   );
   const [editStrategy, setEditStrategy] = useState<EditStrategy>(normalizeEditStrategy(initialDraft?.editStrategy));
-  const [removeSilence, setRemoveSilence] = useState(initialDraft?.removeSilence ?? true);
-  const [removeRetakes, setRemoveRetakes] = useState(initialDraft?.removeRetakes ?? true);
+  const [preparedClip, setPreparedClip] = useState(initialDraft?.preparedClip === true);
+  const [removeSilence, setRemoveSilence] = useState(initialDraft?.removeSilence ?? !initialDraft?.preparedClip);
+  const [removeRetakes, setRemoveRetakes] = useState(initialDraft?.removeRetakes ?? !initialDraft?.preparedClip);
   const [highlightTarget, setHighlightTarget] = useState(initialDraft?.highlightTarget ?? 30);
   const sourceRequestRef = useRef(0);
   const [agentProbe, setAgentProbe] = useState<Record<string, AgentProbe>>({});
@@ -620,7 +625,7 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
   // Tauri drag-drop event owns drops; the DOM handlers below are the browser
   // fallback. probeRef keeps the event listener on the latest closure.
   const dropzoneRef = useRef<HTMLDivElement>(null);
-  const probeRef = useRef<(targetPath: string) => Promise<void>>(async () => {});
+  const probeRef = useRef<(targetPath: string, intent?: "replace" | "resume" | "prepared") => Promise<void>>(async () => {});
 
   const [showPostRenderModal, setShowPostRenderModal] = useState<boolean>(false);
   const [reviewReport, setReviewReport] = useState<VideoReviewReport | null>(
@@ -633,6 +638,7 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
   };
 
   const [streamUrl, setStreamUrl] = useState("");
+  const [clipLength, setClipLength] = useState<StreamLengthId>("standard");
   const [streamQuery, setStreamQuery] = useState("");
   const [streamUseAsSource, setStreamUseAsSource] = useState<number | null>(null);
 
@@ -659,8 +665,9 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
     setSelectedAgent(draft.agentId);
     sourceRequestRef.current++;
     setEditStrategy(normalizeEditStrategy(draft.editStrategy));
-    setRemoveSilence(draft.removeSilence ?? true);
-    setRemoveRetakes(draft.removeRetakes ?? true);
+    setPreparedClip(draft.preparedClip === true);
+    setRemoveSilence(draft.removeSilence ?? !draft.preparedClip);
+    setRemoveRetakes(draft.removeRetakes ?? !draft.preparedClip);
     setHighlightTarget(draft.highlightTarget ?? 30);
     setIsProbing(false);
     setProbeError(null);
@@ -703,6 +710,7 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
       aspectRatio,
       agentId: selectedAgent,
       editStrategy,
+      preparedClip,
       removeSilence,
       removeRetakes,
       highlightTarget,
@@ -750,6 +758,7 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
     aspectRatio,
     selectedAgent,
     editStrategy,
+    preparedClip,
     removeSilence,
     removeRetakes,
     highlightTarget,
@@ -897,9 +906,8 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
   const [trendingLoading, setTrendingLoading] = useState(false);
 
   // Stream clip finder: paste a public YouTube / Twitch VOD link, get
-  // the best windows. Source only collects footage — taste choices
-  // (model, length, framing) live in Edit; the finder uses the Edit
-  // editing model with the Standard length band.
+  // windows in the length band chosen on this card. A live stream keeps
+  // that band and searches once the replay exists.
   // Framing: the engine always auto-detects the facecam, so picking a
   // framing is enough — there is no manual face-source picker. Auto
   // split-stacks corner cams and face-centers everything else.
@@ -942,9 +950,22 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
     });
   }, [streamUrl, streamLayout, onStreamRunsChange]);
 
+  // The live watcher reads the length stored on the run, including while
+  // this view is closed. Keep that field aligned with the control.
+  useEffect(() => {
+    const url = streamUrl.trim();
+    const length = parseStreamLength(clipLength);
+    onStreamRunsChange((prev) => {
+      const run = prev.runs[url];
+      if (!run || run.length === length) return prev;
+      return { ...prev, runs: { ...prev.runs, [url]: { ...run, length, updatedAt: new Date().toISOString() } } };
+    });
+  }, [streamUrl, clipLength, onStreamRunsChange]);
+
   const loadRunIntoView = (run: StreamRun) => {
     setActiveStage("source");
     setStreamUrl(run.url);
+    setClipLength(parseStreamLength(run.length));
     // Stored runs from before auto framing predate the layout field.
     setStreamLayout((run.layout as StreamLayoutId) || "auto");
     setStreamQuery("");
@@ -1107,7 +1128,11 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
       return;
     }
     onAnalyzeStream(url, {
-      ...streamSuggestOptions({ agentId: selectedAgent, channelContext: getEffectiveContext(contextOverride) || undefined }),
+      ...streamSuggestOptions({
+        agentId: selectedAgent,
+        channelContext: getEffectiveContext(contextOverride) || undefined,
+        length: clipLength,
+      }),
       elevenlabsKey: elevenLabsKey,
     }, streamLayout);
   };
@@ -1182,8 +1207,8 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
       notify(
         "Clips imported as sources",
         skipped > 0
-          ? `${imported.length} clip${imported.length === 1 ? "" : "s"} added, ${skipped} skipped — open each from the sidebar to edit and render it`
-          : `${imported.length} clip${imported.length === 1 ? "" : "s"} added — open each from the sidebar to edit and render it`,
+          ? `${imported.length} clip${imported.length === 1 ? "" : "s"} added, ${skipped} skipped. Open each one from the sidebar to add captions.`
+          : `${imported.length} clip${imported.length === 1 ? "" : "s"} added. Captions are next.`,
         skipped > 0 ? "warning" : "success",
       );
     } catch (err) {
@@ -1198,9 +1223,8 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
     }
   };
 
-  // Use one stream clip as this short's source: downloads just that
-  // window, probes it, and scrolls to Edit so the single-page flow
-  // continues in the Edit & format stage.
+  // Use one stream window as this short's source. The window is already
+  // cut, so it keeps the whole file and opens on Captions.
   const handleUseClipAsSource = async (index: number) => {
     const res = streamResult;
     const url = streamUrl.trim();
@@ -1220,13 +1244,12 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
       }
       const saved = resolvedClipOutput(fetched, workInput);
       setInputPath(saved);
-      await handleProbePath(saved);
+      await handleProbePath(saved, "prepared");
       notify(
         "Clip set as source",
-        `Clip ${index + 1} (${formatClipRange(clip.start, clip.end)}) is now the source — continue in Edit & format`,
+        `Clip ${index + 1} (${formatClipRange(clip.start, clip.end)}) is ready. Add captions, then export.`,
         "success",
       );
-      scrollToSection("studio-edit");
     } catch (err) {
       notify(
         "Could not use clip",
@@ -1435,8 +1458,25 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
     };
   }, []);
 
-  const handleProbePath = async (targetPath: string) => {
+  const handleProbePath = async (targetPath: string, intent: "replace" | "resume" | "prepared" = "replace") => {
     if (!targetPath.trim()) return;
+    const keepWhole = intent === "prepared" || (intent === "resume" && preparedClip);
+    if (intent === "prepared") {
+      const prepared = preparedClipFields();
+      setPreparedClip(true);
+      setEditStrategy(prepared.editStrategy);
+      setRemoveSilence(prepared.removeSilence);
+      setRemoveRetakes(prepared.removeRetakes);
+      setBurnInCaptions(prepared.burnInCaptions);
+      setCustomInstructionsEnabled(false);
+      setPromptHook("");
+    } else if (intent === "replace" && preparedClip) {
+      // A file the user picks is a raw recording, not a finder window.
+      setPreparedClip(false);
+      setEditStrategy("cleanup");
+      setRemoveSilence(true);
+      setRemoveRetakes(true);
+    }
     setActiveStage("source");
     setIsProbing(true);
     setProbeError(null);
@@ -1453,7 +1493,7 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
       const meta = await onProbeVideo(targetPath.trim());
       if (!mountedRef.current || request !== sourceRequestRef.current) return;
       setMetadata(meta);
-      goToStage("edit");
+      goToStage(keepWhole ? "captions" : "edit");
     } catch (err: unknown) {
       if (!mountedRef.current || request !== sourceRequestRef.current) return;
       setProbeError(
@@ -1466,7 +1506,7 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
   };
   probeRef.current = handleProbePath;
   useEffect(() => {
-    if (inputPath.trim() && !metadata && !isProbing && !probeError) void probeRef.current(inputPath);
+    if (inputPath.trim() && !metadata && !isProbing && !probeError) void probeRef.current(inputPath, "resume");
   }, [inputPath, metadata, isProbing, probeError]);
 
   const handleBrowseFile = async () => {
@@ -1895,6 +1935,24 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
                 contentClassName="flex flex-col"
               >
                 <div className="flex flex-1 flex-col gap-3">
+                  <Field
+                    label="Clip length"
+                    hint={`${STREAM_LENGTHS[clipLength].label} windows are ${STREAM_LENGTHS[clipLength].hint}. A live stream uses this length once the replay is ready.`}
+                  >
+                    <Segmented
+                      fill
+                      label="Clip length"
+                      value={clipLength}
+                      onChange={(value) => {
+                        if (streamAnalyzing) return;
+                        setClipLength(value);
+                      }}
+                      options={(Object.keys(STREAM_LENGTHS) as StreamLengthId[]).map((id) => ({
+                        value: id,
+                        label: STREAM_LENGTHS[id].label,
+                      }))}
+                    />
+                  </Field>
                   {/* Button sits outside Field so the label-row button
                       shrink rule doesn't apply; bottoms align with the input. */}
                   <div className="flex items-end gap-2">
@@ -2055,7 +2113,7 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
 
                   <div className="mt-auto space-y-2 border-t border-separator pt-3">
                     {editingModelSelector(true)}
-                    <p className="text-xs leading-relaxed text-muted">Auto cut uses local scoring; a CLI can plan the moments with AI. Import the clips you want, then adjust their edit and framing.</p>
+                    <p className="text-xs leading-relaxed text-muted">Auto cut scores moments on this computer. A CLI can plan them with AI. Find clips searches for the length above.</p>
                   </div>
                 </div>
               </SectionCard>
@@ -2187,7 +2245,7 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
                                   streamImporting || streamUseAsSource !== null
                                 }
                                 onClick={() => handleUseClipAsSource(index)}
-                                title="Download this clip and edit it through Style → Captions → Metadata → Render"
+                                title="Download this clip and open it on Captions"
                               >
                                 {usingAsSource
                                   ? "Setting source…"
@@ -2225,11 +2283,11 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
                       </Button>
                     )}
                     <p className="text-xs leading-relaxed text-muted">
-                      Only the winning windows are downloaded — never the
-                      full video. Each clip is fetched on its own, so a
-                      failed window is skipped and the rest still become
-                      sidebar sources. Open each one to edit and render it
-                      like any uploaded video.
+                      Only the winning windows are downloaded. Each one is
+                      already the short, so it opens on Captions. Export
+                      burns subtitles, framing, and grade onto the whole
+                      clip. A failed window is skipped and the rest still
+                      become sidebar sources.
                     </p>
                   </div>
                 </SectionCard>
@@ -2241,6 +2299,11 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
             <section id="studio-edit" hidden={activeStage !== "edit"} aria-label="Edit and format" className="studio-panel grid grid-cols-1 gap-5">
               <SectionCard title="How would you like to edit?" description="Start with a mode. Fine-tune the details below.">
                 <div className="space-y-4">
+                  {preparedClip && (
+                    <p className="text-sm leading-relaxed text-muted">
+                      This window is already a short. Keep full video burns captions, framing, and the color grade onto the whole clip.
+                    </p>
+                  )}
                   <div className="studio-edit-modes grid gap-3" role="group" aria-label="Editing mode">
                     {([
                       ["cleanup", "Clean up", "Remove pauses & repeated takes"],

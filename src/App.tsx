@@ -424,7 +424,7 @@ export function App() {
     isStreamRunning,
     startAnalysis,
     (run) => ({
-      ...streamSuggestOptions({ agentId: run.agent }),
+      ...streamSuggestOptions({ agentId: run.agent, length: run.length }),
       elevenlabsKey: elevenLabsKey,
       transcriptionProvider,
     }),
@@ -537,10 +537,9 @@ export function App() {
     setActiveTab("studio");
   }, []);
 
-  // Import downloaded stream clips as their own sidebar sources: each
-  // clip gets a fresh draft (same starting point as an uploaded file)
-  // and the first one opens in Studio so editing continues immediately;
-  // the rest wait in the sidebar.
+  // Import downloaded stream windows as sidebar sources. Each window is
+  // already the short: the draft keeps the whole file and opens on
+  // Captions. The first clip opens in Studio; the rest wait in the sidebar.
   const handleImportClipsAsSources = useCallback(
     (clips: { inputPath: string; metadata: StudioProjectDraft["metadata"]; title?: string }[]) => {
       if (clips.every((clip) => !clip.inputPath.trim())) return;

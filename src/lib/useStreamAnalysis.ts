@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { createStreamAnalysisRunner, isBusyClipJob, type StreamAnalysisJobs } from "./streamAnalysis";
-import { probeStream, suggestStreamClips } from "./streamClips";
+import { parseStreamLength, probeStream, suggestStreamClips } from "./streamClips";
 import { notify } from "./notify";
 import {
   armWatchLive,
@@ -26,7 +26,7 @@ export function useStreamAnalysis(
       setRuns((prev) => upsertStreamRun(prev, {
         ...(prev.runs[job.url] ?? blankStreamRun(job.url)),
         result: null, selected: [], agent: options.agentId || "auto", layout,
-        workflow: "review", length: "standard", updatedAt: job.startedAt,
+        workflow: "review", length: parseStreamLength(options.length), updatedAt: job.startedAt,
       }));
     },
     onProbe(url, probe) {
