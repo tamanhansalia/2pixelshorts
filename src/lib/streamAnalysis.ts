@@ -4,11 +4,54 @@ export type StreamAnalysisJob = {
   url: string;
   startedAt: string;
 } & (
-  | { status: "running" }
+  | { status: "running"; detail?: string }
   | { status: "watching" }
   | { status: "completed"; finishedAt: string; clipCount: number }
   | { status: "failed"; finishedAt: string; error: string }
 );
+
+/** What the clip finder should say while a helper line arrives.
+ *
+ * A replay with no captions falls through to a full-audio listen. Those
+ * lines are the only signal that the wait is transcription, not a search
+ * that has already failed. */
+export function clipRunDetail(line: string): string | null {
+  const processed = line.match(/\[TRANSCRIBE\] Processed (\d+)\/(\d+)s/);
+  if (processed) {
+    const done = Number(processed[1]);
+    const total = Number(processed[2]);
+    if (Number.isFinite(done) && Number.isFinite(total) && total > 0) {
+      return `No captions on this replay. Transcribing the full replay · ${formatListenMinutes(done)} of ${formatListenMinutes(total)}.`;
+    }
+  }
+  if (/captions unavailable|transcribing source audio/i.test(line)) {
+    return "No captions on this replay. Transcribing the full replay.";
+  }
+  return null;
+}
+
+function formatListenMinutes(seconds: number): string {
+  const minutes = Math.max(0, Math.round(seconds / 60));
+  return minutes === 1 ? "1 min" : `${minutes} min`;
+}
+
+/** The helper prefixes its own errors. The card shows the sentence. */
+export function clipFailureText(error: string): string {
+  const text = error.replace(/^stream_clip\.py:\s*/i, "").replace(/\s+/g, " ").trim();
+  return text || "Clip finding failed.";
+}
+
+export function applyClipProgress(
+  jobs: StreamAnalysisJobs,
+  url: string,
+  line: string,
+): StreamAnalysisJobs {
+  const job = jobs[url];
+  if (!job || job.status !== "running") return jobs;
+  const detail = clipRunDetail(line);
+  if (!detail || job.detail === detail) return jobs;
+  return { ...jobs, [url]: { ...job, detail } };
+}
 
 export type StreamAnalysisJobs = Record<string, StreamAnalysisJob>;
 

@@ -1,3 +1,4 @@
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { invoke } from "./invoke.ts";
 import { transcriptionInvokeParams, type TranscriptionProvider } from "./transcription.ts";
 import { isTauri } from "./ipc.ts";
@@ -401,6 +402,23 @@ export async function probeStream(url: string): Promise<StreamProbe> {
     return await invoke<StreamProbe>("probe_stream", { url: clean });
   }
   throw new Error("Open the 2pixelshorts desktop app to analyze and download source footage with video-use.");
+}
+
+export interface ClipProgressEvent {
+  url: string;
+  line: string;
+}
+
+/** Stderr lines from an in-flight Find clips run. No-op in the browser. */
+export async function listenClipProgress(
+  cb: (event: ClipProgressEvent) => void,
+): Promise<UnlistenFn> {
+  if (isTauri()) {
+    return await listen<ClipProgressEvent>("clip-progress", (event) => {
+      cb(event.payload);
+    });
+  }
+  return () => {};
 }
 
 export async function suggestStreamClips(

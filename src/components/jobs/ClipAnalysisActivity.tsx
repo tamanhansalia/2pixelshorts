@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { AlertCircle, ArrowUpRight, CheckCircle2, Sparkles, X } from "lucide-react";
 import { Spinner } from "@heroui/react";
-import { isBusyClipJob, type StreamAnalysisJob } from "../../lib/streamAnalysis";
+import { clipFailureText, isBusyClipJob, type StreamAnalysisJob } from "../../lib/streamAnalysis";
 import { formatClipTime } from "../../lib/streamClips";
 import { LinearProgress } from "../ui/LinearProgress";
 
@@ -47,8 +47,10 @@ export function ClipAnalysisActivity({ jobs, onOpen, onDismiss }: Props) {
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-xs font-medium">{job.title}</span>
                   {job.status === "watching" && <span className="mt-0.5 block text-xs text-muted">Waiting for the replay</span>}
-                  {job.status !== "running" && job.status !== "watching" && <span className={`mt-0.5 block text-xs ${job.status === "failed" ? "text-danger" : "text-muted"}`}>
-                    {job.status === "failed" ? "Failed · open to retry"
+                  {job.status === "running" && <span className="mt-0.5 block text-xs leading-relaxed text-muted">{job.detail || "Finding clips"}</span>}
+                  {job.status !== "running" && job.status !== "watching" && <span className={`mt-0.5 block text-xs leading-relaxed ${job.status === "failed" ? "text-danger" : "text-muted"}`}>
+                    {job.status === "failed"
+                      ? <>Failed · open to retry<span className="mt-0.5 block break-words font-normal">{clipFailureText(job.error)}</span></>
                       : job.clipCount ? `${job.clipCount} clip${job.clipCount === 1 ? "" : "s"} ready` : "No clips found"}
                   </span>}
                 </span>

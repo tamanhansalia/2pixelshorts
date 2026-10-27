@@ -1,6 +1,7 @@
 use crate::models::{CommandOutput, VideoMetadata};
 use serde_json::Value;
 use std::path::Path;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 
 pub(crate) struct ProcessTree(Option<u32>);
@@ -206,7 +207,7 @@ mod tests {
 pub async fn run_cli_process(
     command_name: &str, args: &[String], working_dir: Option<&str>,
 ) -> Result<CommandOutput, String> {
-    run_process(command_name, args, working_dir, false).await
+    run_process(command_name, args, working_dir, false, None).await
 }
 
 /// Privacy handling is reserved for the app's generated helper commands.
@@ -214,11 +215,27 @@ pub async fn run_cli_process(
 pub async fn run_helper_process(
     command_name: &str, args: &[String], working_dir: Option<&str>,
 ) -> Result<CommandOutput, String> {
-    run_process(command_name, args, working_dir, true).await
+    run_process(command_name, args, working_dir, true, None).await
+}
+
+/// Same as [`run_helper_process`], and calls `on_stderr_line` for each
+/// stderr line as the helper prints it. Clip finding uses this so a long
+/// replay can say it is transcribing before the process exits.
+pub async fn run_helper_process_lines<F>(
+    command_name: &str, args: &[String], working_dir: Option<&str>, on_stderr_line: F,
+) -> Result<CommandOutput, String>
+where
+    F: FnMut(&str) + Send + 'static,
+{
+    run_process(command_name, args, working_dir, true, Some(Box::new(on_stderr_line))).await
 }
 
 async fn run_process(
-    command_name: &str, args: &[String], working_dir: Option<&str>, is_helper: bool,
+    command_name: &str,
+    args: &[String],
+    working_dir: Option<&str>,
+    is_helper: bool,
+    mut on_stderr_line: Option<Box<dyn FnMut(&str) + Send>>,
 ) -> Result<CommandOutput, String> {
     let (private_args, secrets) = if is_helper { private_process_args(args) } else { (args.to_vec(), Vec::new()) };
     let args = &private_args;
@@ -253,21 +270,49 @@ async fn run_process(
 
     ProcessTree::configure(&mut cmd);
     cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
-    let child = cmd.spawn().map_err(|e| format!("Failed to execute '{}': {}", command_name, e))?;
+    let mut child = cmd.spawn().map_err(|e| format!("Failed to execute '{}': {}", command_name, e))?;
     let _tree = ProcessTree::new(&child);
-    let output = child
-        .wait_with_output()
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    // Drain stdout while stderr is read line by line. A full pipe on either
+    // side would stall the helper until the command looks hung.
+    let stdout_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        if let Some(mut out) = stdout_pipe {
+            let _ = out.read_to_end(&mut buf).await;
+        }
+        buf
+    });
+    let mut stderr_text = String::new();
+    if let Some(err) = stderr_pipe {
+        let mut lines = BufReader::new(err).lines();
+        loop {
+            match lines.next_line().await {
+                Ok(Some(line)) => {
+                    let line = redact_secrets(line, &secrets);
+                    if let Some(callback) = on_stderr_line.as_mut() {
+                        callback(&line);
+                    }
+                    stderr_text.push_str(&line);
+                    stderr_text.push('\n');
+                }
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+    }
+    let stdout_buf = stdout_task.await.unwrap_or_default();
+    let status = child
+        .wait()
         .await
         .map_err(|e| format!("Failed to execute '{}': {}", command_name, e))?;
-
-    let stdout = redact_secrets(String::from_utf8_lossy(&output.stdout).to_string(), &secrets);
-    let stderr = redact_secrets(String::from_utf8_lossy(&output.stderr).to_string(), &secrets);
+    let stdout = redact_secrets(String::from_utf8_lossy(&stdout_buf).to_string(), &secrets);
 
     Ok(CommandOutput {
-        success: output.status.success(),
-        code: output.status.code().unwrap_or(-1),
+        success: status.success(),
+        code: status.code().unwrap_or(-1),
         stdout,
-        stderr,
+        stderr: stderr_text,
         fallback_used: false,
     })
 }

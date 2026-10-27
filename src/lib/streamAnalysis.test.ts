@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { createStreamAnalysisRunner, isBusyClipJob, type StreamAnalysisJob } from "./streamAnalysis.ts";
+import { applyClipProgress, clipFailureText, clipRunDetail, createStreamAnalysisRunner, isBusyClipJob, type StreamAnalysisJob } from "./streamAnalysis.ts";
 import type { StreamProbe, SuggestStreamClipsResult } from "./streamClips.ts";
 import { blankStreamRun, emptyStreamRunStore, upsertStreamRun } from "./streamRuns.ts";
 
@@ -18,6 +18,45 @@ function result(url: string): SuggestStreamClipsResult {
     clips: [{ start: 10, end: 40, score: .9, reason: "Hook", text: "A complete thought" }],
   };
 }
+
+describe("clip finder status copy", () => {
+  it("says when a replay has no captions and reports listen progress", () => {
+    assert.equal(clipRunDetail("[youtube] Downloading webpage"), null);
+    assert.equal(
+      clipRunDetail("[STREAM] Captions unavailable; downloading audio for local transcription"),
+      "No captions on this replay. Transcribing the full replay.",
+    );
+    assert.equal(
+      clipRunDetail("[STREAM] Transcribing source audio with local; long videos may take several minutes"),
+      "No captions on this replay. Transcribing the full replay.",
+    );
+    assert.equal(
+      clipRunDetail("[TRANSCRIBE] Processed 300/9751s of source audio"),
+      "No captions on this replay. Transcribing the full replay · 5 min of 163 min.",
+    );
+  });
+
+  it("shows the helper sentence on a failed card", () => {
+    assert.equal(
+      clipFailureText("stream_clip.py: Local transcription failed: audio extraction failed: boom"),
+      "Local transcription failed: audio extraction failed: boom",
+    );
+    assert.equal(clipFailureText("   "), "Clip finding failed.");
+  });
+
+  it("records transcription progress only on the running job", () => {
+    const running: StreamAnalysisJob = { url: "https://youtu.be/a", startedAt: "t", status: "running" };
+    const jobs = { [running.url]: running };
+    const listening = applyClipProgress(jobs, running.url, "[STREAM] Captions unavailable; downloading audio for local transcription");
+    const updated = listening[running.url];
+    assert.equal(updated.status, "running");
+    assert.equal(updated.status === "running" ? updated.detail : "",
+      "No captions on this replay. Transcribing the full replay.");
+    const failed: StreamAnalysisJob = { url: running.url, startedAt: "t", status: "failed", finishedAt: "t", error: "boom" };
+    const failedJobs = { [running.url]: failed };
+    assert.equal(applyClipProgress(failedJobs, running.url, "[STREAM] Captions unavailable"), failedJobs);
+  });
+});
 
 describe("App-owned clip analysis", () => {
   it("treats running and watching jobs as busy", () => {

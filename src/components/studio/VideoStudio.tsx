@@ -47,7 +47,7 @@ import {
 import { fetchTrending, isTauri, reviewRender } from "../../lib/ipc";
 import { automationParams, nextAutomaticExport, normalizeEditStrategy, type EditStrategy } from "../../lib/studioAutomation";
 import type { StudioSeoJob } from "../../lib/seoJobs";
-import { isBusyClipJob, type StreamAnalysisJobs } from "../../lib/streamAnalysis";
+import { clipFailureText, isBusyClipJob, type StreamAnalysisJobs } from "../../lib/streamAnalysis";
 import {
   LEGACY_DEFAULT,
   getDefaultProfile,
@@ -2079,10 +2079,21 @@ export const VideoStudio: React.FC<VideoStudioProps> = ({
                   {streamAnalyzing && (
                     <div role="status" className="space-y-2 rounded-lg border border-accent/20 bg-accent/5 p-3">
                       <div className="flex items-center gap-2 text-sm font-medium">
-                        <Spinner size="sm" color="current" /> Finding the best moments
+                        <Spinner size="sm" color="current" /> {streamJob?.status === "running" && streamJob.detail ? "Transcribing the full replay" : "Finding the best moments"}
                       </div>
-                      <LinearProgress label="Finding clips" />
-                      <p className="text-xs leading-relaxed text-muted">Reading captions or transcribing audio, then selecting clips. Long videos may take several minutes.</p>
+                      <LinearProgress label={streamJob?.status === "running" && streamJob.detail ? "Transcribing the replay" : "Finding clips"} />
+                      <p className="text-xs leading-relaxed text-muted">
+                        {streamJob?.status === "running" && streamJob.detail
+                          ? streamJob.detail
+                          : "Reading captions, then selecting clips. A replay with no captions is transcribed on this computer, which can take a while."}
+                      </p>
+                    </div>
+                  )}
+
+                  {streamJob?.status === "failed" && !streamAnalyzing && (
+                    <div role="status" className="space-y-1 rounded-lg border border-danger/20 bg-danger/5 p-3">
+                      <div className="text-sm font-medium">Clip finding failed</div>
+                      <p className="break-words text-xs leading-relaxed text-danger">{clipFailureText(streamJob.error)}</p>
                     </div>
                   )}
 

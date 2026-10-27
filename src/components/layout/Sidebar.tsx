@@ -26,6 +26,7 @@ import {
   type SourceStatus,
 } from "../../lib/studioProjects";
 import type { StreamSidebarItem } from "../../lib/streamRuns";
+import { clipFailureText } from "../../lib/streamAnalysis";
 import { ClipAnalysisActivity, type ClipActivityItem } from "../jobs/ClipAnalysisActivity";
 import { SIDEBAR_GROUPS_KEY as COLLAPSED_GROUPS_KEY } from "../../lib/appReset";
 
@@ -423,9 +424,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
                       {stream.isLive ? (
                         <span className="shrink-0 text-[10px] font-semibold tracking-wide text-danger">LIVE</span>
                       ) : null}
-                      {job?.status === "running" ? null
+                      {job?.status === "running"
+                        ? (job.detail ? <span className="shrink-0 text-xs text-muted">Transcribing</span> : null)
                         : job?.status === "watching" || stream.watching ? <span className="text-xs text-muted">Watching</span>
-                        : job?.status === "failed" ? <span className="text-xs text-danger">Failed</span>
+                        : job?.status === "failed" ? <span className="text-xs text-danger" title={clipFailureText(job.error)}>Failed</span>
                         : stream.clipCount !== null ? (
                         <span className="tabular-nums shrink-0 text-xs text-muted group-hover:hidden">
                           {stream.clipCount}

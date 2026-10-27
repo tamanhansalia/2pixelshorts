@@ -525,6 +525,7 @@ async fn probe_stream(url: String) -> Result<serde_json::Value, String> {
 /// fixed quota. Returns the suggestion JSON document.
 #[tauri::command]
 async fn suggest_stream_clips(
+    app: tauri::AppHandle,
     url: String,
     transcription_provider: Option<String>,
     elevenlabs_key: Option<String>,
@@ -538,6 +539,7 @@ async fn suggest_stream_clips(
     min_gap: Option<f64>,
 ) -> Result<serde_json::Value, String> {
     let script = jobs::resolve_helper_script("stream_clip.py");
+    let progress_url = url.clone();
     let mut args = vec![
         script,
         "--suggest".to_string(),
@@ -585,7 +587,13 @@ async fn suggest_stream_clips(
         args.push(v.to_string());
     }
     let python = jobs::resolve_python();
-    let out = video_runner::run_helper_process(&python, &args, None).await?;
+    let out = video_runner::run_helper_process_lines(&python, &args, None, move |line| {
+        use tauri::Emitter;
+        let _ = app.emit(
+            "clip-progress",
+            serde_json::json!({ "url": &progress_url, "line": line }),
+        );
+    }).await?;
     if !out.success {
         let detail = if out.stderr.trim().is_empty() {
             out.stdout.trim().to_string()

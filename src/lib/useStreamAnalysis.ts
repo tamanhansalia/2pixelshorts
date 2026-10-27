@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import { createStreamAnalysisRunner, isBusyClipJob, type StreamAnalysisJobs } from "./streamAnalysis";
-import { parseStreamLength, probeStream, suggestStreamClips } from "./streamClips";
+import { applyClipProgress, clipFailureText, createStreamAnalysisRunner, isBusyClipJob, type StreamAnalysisJobs } from "./streamAnalysis";
+import { listenClipProgress, parseStreamLength, probeStream, suggestStreamClips } from "./streamClips";
 import { notify } from "./notify";
 import {
   armWatchLive,
@@ -70,9 +70,24 @@ export function useStreamAnalysis(
     onFailure(job) {
       watchingAnnounced.current.delete(job.url);
       setJobs((prev) => ({ ...prev, [job.url]: job }));
-      if (job.status === "failed") notify("Clip finding failed", job.error, "error");
+      if (job.status === "failed") notify("Clip finding failed", clipFailureText(job.error), "error");
     },
   }));
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    listenClipProgress((event) => {
+      setJobs((prev) => applyClipProgress(prev, event.url, event.line));
+    }).then((off) => {
+      if (disposed) off();
+      else unlisten = off;
+    }).catch(() => {});
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   // App reload: persisted watch-for-VOD runs have no in-memory job.
   const watchKey = watchableLiveUrls(runs).join("\n");
